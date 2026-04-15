@@ -1,3 +1,6 @@
 __pycache__/
-test/py
-results/*
+*.pyc
+test.py
+results/
+logs*/
+models*/

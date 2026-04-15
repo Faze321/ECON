@@ -11,7 +11,7 @@ from loguru import logger
 class LLMConfig:
     api_key: str
     model_name: str
-    base_url: str = "https://api.together.xyz/v1"
+    base_url: str = "https://openrouter.ai/api/v1"
     timeout: int = 60
     max_retries: int = 3
     debug: bool = False
@@ -30,7 +30,7 @@ class ImprovedLLMWrapper:
                  api_key: str,
                  model_name: str,
                  belief_dim: Optional[int] = None,
-                 base_url: str = "https://api.together.xyz/v1",
+                 base_url: str = "https://openrouter.ai/api/v1",
                  timeout: Optional[int] = None,
                  max_retries: int = 3,
                  debug: bool = False,
@@ -65,7 +65,7 @@ class ImprovedLLMWrapper:
         # 仅为接口兼容保留
         self.belief_dim = belief_dim
         masked = (api_key[:4] + "*" * max(0, len(api_key) - 8) + api_key[-4:]) if api_key else "(empty)"
-        logger.info(f"[APIHandler] Together API key resolved: {masked}")
+        logger.info(f"[APIHandler] OpenRouter API key resolved: {masked}")
 
     # ---------------------- public API ----------------------
     def generate_response(self,
@@ -101,7 +101,7 @@ class ImprovedLLMWrapper:
                 resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=self.cfg.timeout)
                 if resp.status_code != 200:
                     if self.cfg.debug:
-                        logger.warning(f"[Together] HTTP {resp.status_code}: {resp.text}")
+                        logger.warning(f"[OpenRouter] HTTP {resp.status_code}: {resp.text}")
                     last_err = RuntimeError(f"HTTP {resp.status_code}")
                     time.sleep(min(1.5 * (attempt + 1), 6.0))
                     continue
@@ -113,11 +113,11 @@ class ImprovedLLMWrapper:
             except Exception as e:
                 last_err = e
                 if self.cfg.debug:
-                    logger.warning(f"[Together] request failed (attempt {attempt+1}/{self.cfg.max_retries}): {e}")
+                    logger.warning(f"[OpenRouter] request failed (attempt {attempt+1}/{self.cfg.max_retries}): {e}")
                 time.sleep(min(1.5 * (attempt + 1), 6.0))
 
         # Fallback: conservative
-        logger.error(f"[Together] All retries failed, fallback empty output. Last error: {last_err}")
+        logger.error(f"[OpenRouter] All retries failed, fallback empty output. Last error: {last_err}")
         return ""
 
     # ---------------------- helpers ----------------------

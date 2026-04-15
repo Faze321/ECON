@@ -606,10 +606,9 @@ class LLMBasicMAC:
                 commitment_emb_0 = commitment_emb.detach().clone()
 
 
-            e_next = e_current.clone()
-
             context_manager = torch.no_grad() if mode == "infer" else torch.enable_grad()
             with context_manager:
+                delta_e_list = []
                 for i in range(N):
                     output_i_emb = self._ensure_vector_dim(output_embs[i:i+1], self.commitment_dim)
                     commitment_emb_batch = self._ensure_vector_dim(commitment_emb.unsqueeze(0), self.commitment_dim)
@@ -620,13 +619,17 @@ class LLMBasicMAC:
                         group_repr=group_repr.unsqueeze(0),
                         e_prev=e_current[i:i+1]
                     ).squeeze(0)
+                    delta_e_list.append(delta_e)
 
-
-                    e_next[i] = e_current[i] + update_eta * delta_e
-
-
-            e_next[:, 0] = torch.clamp(e_next[:, 0], T_min, T_max)  # Temperature
-            e_next[:, 1] = torch.clamp(e_next[:, 1], p_min, p_max)  # repetition_penalty
+                delta_e_all = torch.stack(delta_e_list, dim=0)  # (N, 2)
+                e_next_raw = e_current + update_eta * delta_e_all
+                e_next = torch.stack(
+                    [
+                        torch.clamp(e_next_raw[:, 0], T_min, T_max),  # Temperature
+                        torch.clamp(e_next_raw[:, 1], p_min, p_max),  # repetition_penalty
+                    ],
+                    dim=-1
+                )
 
 
             for i in range(N):
@@ -649,6 +652,7 @@ class LLMBasicMAC:
 
             if self._has_commitment_converged(commitment, commitment_new, commitment_emb, commitment_emb_new):
                 logger.info(f"[BNE {mode}] Converged at iteration {iteration+1}: commitment equivalent")
+                e_current = e_next
                 commitment = commitment_new
                 outputs = outputs_new
                 commitment_emb = commitment_emb_new
@@ -657,6 +661,7 @@ class LLMBasicMAC:
 
             if self._has_commitment_oscillated(commitment_emb_history, commitment_text_history):
                 logger.warning(f"[BNE {mode}] Oscillation detected at iteration {iteration+1}; terminating refinement")
+                e_current = e_next
                 commitment = commitment_new
                 outputs = outputs_new
                 commitment_emb = commitment_emb_new
@@ -665,6 +670,7 @@ class LLMBasicMAC:
 
             if convergence_eps > 0 and delta_magnitude < convergence_eps:
                 logger.info(f"[BNE {mode}] Converged at iteration {iteration+1}: delta={delta_magnitude:.4f} < {convergence_eps}")
+                e_current = e_next
                 commitment = commitment_new
                 outputs = outputs_new
                 commitment_emb = commitment_emb_new

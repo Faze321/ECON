@@ -193,6 +193,8 @@ def setup_experiment(config: SimpleNamespace):
 # run_training
 # ------------------------
 def run_training(config: SimpleNamespace, runner, learner, logger, device):
+    # torch.autograd.set_detect_anomaly(True)
+
     logger.info("Starting training...")
 
     begin_time = time.time()

@@ -13,9 +13,9 @@ max_seq_length: 1024
 batch_size_run: 1
 
 llm_model_name: "gpt2"
-together_api_key: "${TOGETHER_API_KEY}"
-coordinator_model: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
-executor_model: "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
+together_api_key: "${OPENROUTER_API_KEY}"
+coordinator_model: "meta-llama/llama-3.3-70b-instruct"
+executor_model: "meta-llama/llama-3.1-8b-instruct"
 commitment_embedding_model_name: "BAAI/bge-large-en-v1.5"
 
 env: "huggingface_dataset_env"
