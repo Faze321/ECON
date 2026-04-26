@@ -4,6 +4,7 @@ import sys
 import json
 import argparse
 from pathlib import Path
+
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 _SCRIPT_DIR = os.path.dirname(__file__)
 _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
@@ -11,17 +12,19 @@ sys.path.append(_PROJECT_ROOT)
 sys.path.append(os.path.join(_PROJECT_ROOT, "src"))
 
 
-def run_training(config_file, episodes, log_dir, model_dir):
+
+
+def run_training(config_file, episodes, log_dir, model_dir, logger):
 
     import yaml
     with open(config_file, 'r') as f:
         config = yaml.safe_load(f)
     
     t_max_from_yaml = config.get('t_max', 'unknown')
-    print(f"\n{'='*60}")
+    logger.info(f"\n{'='*60}")
     if episodes is not None:
-        print(f"start: {episodes} episodes")
-    print(f"{'='*60}\n")
+        logger.info(f"start: {episodes} episodes")
+    logger.info(f"{'='*60}\n")
     if episodes is not None:
         config['t_max'] = episodes
 
@@ -37,14 +40,14 @@ def run_training(config_file, episodes, log_dir, model_dir):
     try:
   
         from train import load_config, setup_experiment, run_training as train_run, setup_wandb
-        from utils.logging import get_logger
+        
         
     
         cfg = load_config(temp_config)
         
        
-        logger = get_logger()
-        runner, mac, learner, logger, device = setup_experiment(cfg)
+
+        runner, mac, learner, logger, device = setup_experiment(cfg, logger)
         
       
         setup_wandb(cfg, logger)
@@ -61,16 +64,29 @@ def run_training(config_file, episodes, log_dir, model_dir):
     if os.path.exists(trace_path):
         with open(trace_path, 'r', encoding='utf-8') as f:
             traces = json.load(f)
-        correct = sum(1 for t in traces if t.get('is_correct'))
-        total = len(traces)
-        print(f"\n: {correct}/{total} = {correct/total*100:.1f}%")
+        trace_records = [
+            t for t in traces
+            if not (isinstance(t, dict) and t.get('record_type') == 'train_summary')
+        ]
+        correct = sum(1 for t in trace_records if t.get('is_correct'))
+        total = len(trace_records)
+        acc = correct / total * 100 if total else 0.0
+        trace_records.append({
+            'record_type': 'train_summary',
+            'correct': correct,
+            'total': total,
+            'accuracy': acc,
+        })
+        with open(trace_path, 'w', encoding='utf-8') as f:
+            json.dump(trace_records, f, indent=2, ensure_ascii=False)
+        logger.info(f"\nTrain accuracy: {correct}/{total} = {acc:.1f}%")
 
-def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag):
+def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag, logger):
  
     bne_mode = "mute" if bne_rounds == 0 else f"{bne_rounds}轮"
-    print(f"\n{'='*60}")
-    print(f"test: {episodes} episodes (BNE {bne_mode})")
-    print(f"{'='*60}\n")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"test: {episodes} episodes (BNE {bne_mode})")
+    logger.info(f"{'='*60}\n")
 
     import yaml
     import os
@@ -118,10 +134,8 @@ def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag):
     import torch
     from controllers.basic_mac import BasicMAC
     from runners.episode_runner import EpisodeRunner
-    from utils.logging import get_logger
     from learners.q_learner import ECONLearner
 
-    logger = get_logger()
     runner = EpisodeRunner(args_obj, logger)
     env_info = runner.get_env_info()
 
@@ -147,7 +161,7 @@ def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag):
     }
     groups = {"agents": n_agents}
 
-    mac = BasicMAC(scheme, groups, args_obj)
+    mac = BasicMAC(scheme, groups, args_obj, logger)
     runner.setup(scheme, groups, None, mac)
     learner = ECONLearner(mac, scheme, logger, args_obj)
     if hasattr(runner, "set_alpha_provider"):
@@ -157,9 +171,9 @@ def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag):
     if os.path.exists(model_dir):
         try:
             learner.load_models(model_dir)
-            print(f"✓ model loaded: {model_dir}")
+            logger.info(f"✓ model loaded: {model_dir}")
         except:
-            print(f"⚠ random")
+            logger.warning(f"⚠ random")
 
  
     traces = []
@@ -178,14 +192,20 @@ def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag):
                 mark = "✓" if trace.get('is_correct') else "✗"
                 print(f"Episode {ep_idx+1}/{episodes}: {mark} accuracy={acc:.1f}%")
 
+    total = len(traces)
+    acc = correct / total * 100 if total else 0.0
+    traces.append({
+        'record_type': 'test_summary',
+        'correct': correct,
+        'total': total,
+        'accuracy': acc,
+    })
 
     trace_path = os.path.join(log_dir, f'llm_traces_test_{tag}.json')
     with open(trace_path, 'w', encoding='utf-8') as f:
         json.dump(traces, f, indent=2, ensure_ascii=False)
 
-   
-    acc = correct / len(traces) * 100 if traces else 0
-    print(f"\n ({tag}): {correct}/{len(traces)} = {acc:.1f}%")
+    logger.info(f"\n ({tag}): {correct}/{len(traces)} = {acc:.1f}%")
 
     if bne_rounds > 0 and traces:
         has_meta = sum(1 for t in traces if 'commitment_metadata' in t)
@@ -194,7 +214,7 @@ def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag):
             methods = [t['commitment_metadata']['parse_method'] for t in traces if 'commitment_metadata' in t]
             method_dist = Counter(methods)
             json_rate = method_dist.get('json', 0) / has_meta * 100
-            print(f"{json_rate:.1f}% {dict(method_dist)}")
+            logger.info(f"{json_rate:.1f}% {dict(method_dist)}")
 
     return acc
 
@@ -218,13 +238,15 @@ def main():
     Path(args.log_dir).mkdir(exist_ok=True)
     Path(args.model_dir).mkdir(exist_ok=True)
 
+    from utils.logging import get_logger
+    logger = get_logger(args.log_dir)
 
-    run_training(args.config, args.train_eps, args.log_dir, args.model_dir)
+    run_training(args.config, args.train_eps, args.log_dir, args.model_dir, logger)
 
     print("="*60 + "\n")
 
     # Run testing with BNE
-    run_testing(args.config, args.test_eps, 3, args.log_dir, args.model_dir, "bne_3rounds")
+    run_testing(args.config, args.test_eps, 3, args.log_dir, args.model_dir, "bne_3rounds", logger)
 
 if __name__ == '__main__':
     main()

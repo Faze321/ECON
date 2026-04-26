@@ -5,7 +5,6 @@ from gym import spaces
 import numpy as np
 from datasets import load_dataset
 from typing import Dict, Any, Optional, Tuple, List
-from loguru import logger
 import re
 import torch
 import random
@@ -16,8 +15,9 @@ from modules.text_encoders.output_encoder import OutputEncoder
 class HuggingFaceDatasetEnv(gym.Env):
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
-    def __init__(self, **kwargs):
+    def __init__(self, logger, **kwargs):
         super().__init__()
+        self.logger = logger
         self.dataset_path = kwargs.get("hf_dataset_path", "gsm8k")
         self.dataset_config_name = kwargs.get("hf_dataset_config_name", None)
         self.dataset_split = kwargs.get("dataset_split", "train")
@@ -61,14 +61,14 @@ class HuggingFaceDatasetEnv(gym.Env):
                 self.dataset_iterator = iter(self.dataset)
                 self.dataset_list = None
                 self.num_samples = None
-                logger.info(f"Loaded IterableDataset: {self.dataset_path}, split: {self.dataset_split}")
+                self.logger.info(f"Loaded IterableDataset: {self.dataset_path}, split: {self.dataset_split}")
             else:
                 self.dataset_list = list(self.dataset)
                 self.num_samples = len(self.dataset_list)
                 self.dataset_iterator = None
-                logger.info(f"Loaded Dataset: {self.dataset_path}, split: {self.dataset_split}, num_samples: {self.num_samples}")
+                self.logger.info(f"Loaded Dataset: {self.dataset_path}, split: {self.dataset_split}, num_samples: {self.num_samples}")
         except Exception as e:
-            logger.error(f"Failed to load dataset '{self.dataset_path}' (config: {self.dataset_config_name}, split: {self.dataset_split}): {e}")
+            self.logger.error(f"Failed to load dataset '{self.dataset_path}' (config: {self.dataset_config_name}, split: {self.dataset_split}): {e}")
             raise
 
         self.current_data_idx = -1
@@ -99,7 +99,7 @@ class HuggingFaceDatasetEnv(gym.Env):
             )
         except Exception as e:
             self.output_encoder = None
-            logger.warning(f"[Env] OutputEncoder init failed; AL/CC rewards will fallback to 0. Error: {e}")
+            self.logger.warning(f"[Env] OutputEncoder init failed; AL/CC rewards will fallback to 0. Error: {e}")
 
         if self.use_dataset_episode:
             self.step_count = 0
@@ -163,7 +163,7 @@ class HuggingFaceDatasetEnv(gym.Env):
         if equation and str(equation).strip():
             return str(equation)
 
-        logger.warning(f"[Env] Question text empty. Sample keys: {list(sample.keys())}")
+        self.logger.warning(f"[Env] Question text empty. Sample keys: {list(sample.keys())}")
         return ""
 
     def get_ground_truth_text(self) -> Optional[str]:
@@ -178,7 +178,7 @@ class HuggingFaceDatasetEnv(gym.Env):
             if self.current_sample is not None:
                 self._cur_item = self.current_sample
             else:
-                logger.warning("No current sample available for ground truth extraction")
+                self.logger.warning("No current sample available for ground truth extraction")
                 return None
         
         dataset_hint = str(self.dataset_path).lower()
@@ -215,7 +215,7 @@ class HuggingFaceDatasetEnv(gym.Env):
                     self._cached_ground_truth = value_str
                     return self._cached_ground_truth
 
-        logger.warning(f"Could not extract ground truth from sample. Available keys: {list(self._cur_item.keys())}")
+        self.logger.warning(f"Could not extract ground truth from sample. Available keys: {list(self._cur_item.keys())}")
         return None
 
    
@@ -245,7 +245,7 @@ class HuggingFaceDatasetEnv(gym.Env):
             try:
                 return next(self.dataset_iterator)
             except StopIteration:
-                logger.info("Streaming dataset iterator exhausted.")
+                self.logger.info("Streaming dataset iterator exhausted.")
                 return None
 
         if self.use_dataset_episode:
@@ -296,8 +296,8 @@ class HuggingFaceDatasetEnv(gym.Env):
                 self._cached_ground_truth = self.current_ground_truth_answer
    
         if not self.current_ground_truth_answer:
-            logger.error(f"Failed to extract ground truth for sample {self.current_data_idx}")
-            logger.error(f"Sample keys: {list(self.current_sample.keys())}")
+            self.logger.error(f"Failed to extract ground truth for sample {self.current_data_idx}")
+            self.logger.error(f"Sample keys: {list(self.current_sample.keys())}")
      
 
         self.episode_length = 0
@@ -306,8 +306,8 @@ class HuggingFaceDatasetEnv(gym.Env):
         self.round_history = []
 
         q_preview = self.current_question[:100] + "..." if len(self.current_question) > 100 else self.current_question
-        logger.info(f"Episode {self.episode_count}: idx={self.current_data_idx} | {q_preview}")
-        logger.debug(f"[Env.reset] prev_idx={prev_idx} -> new_idx={self.current_data_idx} | split={self.dataset_split}")
+        self.logger.info(f"Episode {self.episode_count}: idx={self.current_data_idx} | {q_preview}")
+        self.logger.debug(f"[Env.reset] prev_idx={prev_idx} -> new_idx={self.current_data_idx} | split={self.dataset_split}")
 
         observation = self.current_question
         info = {
@@ -333,11 +333,11 @@ class HuggingFaceDatasetEnv(gym.Env):
 
         extra_info = extra_info or {}
 
-        logger.info("=" * 80)
-        logger.info(f"🔍 QUESTION: {self.current_question}")
-        logger.info("=" * 80)
-        logger.info(f"📖 GROUND TRUTH: {self.current_ground_truth_answer}")
-        logger.info("=" * 80)
+        self.logger.info("=" * 80)
+        self.logger.info(f"🔍 QUESTION: {self.current_question}")
+        self.logger.info("=" * 80)
+        self.logger.info(f"📖 GROUND TRUTH: {self.current_ground_truth_answer}")
+        self.logger.info("=" * 80)
 
        
         pred_num = extract_numeric_answer(llm_answer_str, dataset_hint=self.dataset_path)
@@ -365,14 +365,14 @@ class HuggingFaceDatasetEnv(gym.Env):
         # Nudging reward with prompt embeddings so [T, p] directly affect the return
         total_reward = float(max(0.0, min(1.0, total_reward * (0.8 + 0.2 * action_bonus))))
 
-        logger.info(f"   REWARD BREAKDOWN:")
-        logger.info(f"   α = {alpha_weights}")
-        logger.info(f"   TS (Task-Specific): {reward_ts:.3f} * {alpha_weights[1]:.2f} = {reward_ts * alpha_weights[1]:.3f}")
-        logger.info(f"   AL (Action Likelihood): {reward_al:.3f} * {alpha_weights[0]:.2f} = {reward_al * alpha_weights[0]:.3f}")
-        logger.info(f"   CC (Collaborative): {reward_cc:.3f} * {alpha_weights[2]:.2f} = {reward_cc * alpha_weights[2]:.3f}")
-        logger.info(f"   ACTION BONUS (from [T,p]): {action_bonus:.3f}")
-        logger.info(f"   TOTAL REWARD: {total_reward:.3f}")
-        logger.info("=" * 80)
+        self.logger.info(f"   REWARD BREAKDOWN:")
+        self.logger.info(f"   α = {alpha_weights}")
+        self.logger.info(f"   TS (Task-Specific): {reward_ts:.3f} * {alpha_weights[1]:.2f} = {reward_ts * alpha_weights[1]:.3f}")
+        self.logger.info(f"   AL (Action Likelihood): {reward_al:.3f} * {alpha_weights[0]:.2f} = {reward_al * alpha_weights[0]:.3f}")
+        self.logger.info(f"   CC (Collaborative): {reward_cc:.3f} * {alpha_weights[2]:.2f} = {reward_cc * alpha_weights[2]:.3f}")
+        self.logger.info(f"   ACTION BONUS (from [T,p]): {action_bonus:.3f}")
+        self.logger.info(f"   TOTAL REWARD: {total_reward:.3f}")
+        self.logger.info("=" * 80)
 
         terminated = (self.round_count >= self.episode_limit)
         truncated = False
@@ -417,7 +417,7 @@ class HuggingFaceDatasetEnv(gym.Env):
             self._embedding_cache[key] = emb
             return emb
         except Exception as e:
-            logger.warning(f"[Env] embedding failed: {e}")
+            self.logger.warning(f"[Env] embedding failed: {e}")
             return None
 
     def _cosine(self, a: torch.Tensor, b: torch.Tensor) -> float:
@@ -571,4 +571,4 @@ class HuggingFaceDatasetEnv(gym.Env):
                 print("No current sample to render. Call reset() first.")
 
     def close(self):
-        logger.info("Closing HuggingFaceDatasetEnv.")
+        self.logger.info("Closing HuggingFaceDatasetEnv.")

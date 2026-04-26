@@ -11,7 +11,7 @@ import torch.optim as optim
 from modules.mixer.mix_llm import LLMQMixer
 from utils.logging import get_logger
 
-LOG = get_logger()
+# LOG = get_logger()
 
 
 def _safe_mean(x: torch.Tensor, mask: Optional[torch.Tensor] = None, eps: float = 1e-9) -> torch.Tensor:
@@ -47,7 +47,7 @@ class ECONLearner:
 
         if self.bne_enabled:
             # BNE Mode: K independent policy networks + refine module
-            LOG.info("[Learner] BNE mode: using policy_networks + refine_module")
+            self.logger.info("[Learner] BNE mode: using policy_networks + refine_module")
 
             params = []
             n_agents = int(getattr(args, "n_agents", 3))
@@ -82,7 +82,7 @@ class ECONLearner:
 
             self.optimizer = optim.Adam(params, lr=lr, weight_decay=wd)
 
-            LOG.info(f"[Learner] BNE optimizer: {sum(p.numel() for p in params)} params, lr={lr}")
+            self.logger.info(f"[Learner] BNE optimizer: {sum(p.numel() for p in params)} params, lr={lr}")
 
             # Legacy optimizers set to None
             self.opt_belief = None
@@ -91,7 +91,7 @@ class ECONLearner:
 
         else:
             # Legacy Mode: single shared belief network
-            LOG.info("[Learner] Legacy mode: using shared belief_network")
+            self.logger.info("[Learner] Legacy mode: using shared belief_network")
 
             self.params_belief = list(self.mac.agent.belief_network.parameters())
             self.params_encoder = list(self.mac.belief_encoder.parameters())
@@ -447,7 +447,7 @@ class ECONLearner:
 
 
         if bne_e_init is None or bne_e_refined is None or belief_states is None:
-            LOG.warning("[Learner] BNE data not found in batch, falling back to zero losses")
+            self.logger.warning("[Learner] BNE data not found in batch, falling back to zero losses")
             return {"status": "no-bne-data", "loss_total": 0.0}
 
         B, T = reward.size(0), reward.size(1)
@@ -557,7 +557,7 @@ class ECONLearner:
 
         # === 7. Guard against NaN/Inf ===
         if not torch.isfinite(total_loss):
-            LOG.warning("[Learner] NaN/Inf in BNE total_loss, skipping step")
+            self.logger.warning("[Learner] NaN/Inf in BNE total_loss, skipping step")
             return {"status": "nan", "loss_total": float("nan")}
 
         # === 8. Backward and optimize ===
@@ -668,14 +668,14 @@ class ECONLearner:
             torch.save(self.mac.belief_encoder.state_dict(), os.path.join(path, "belief_encoder.th"))
             torch.save(self.mixer.state_dict(), os.path.join(path, "mixer.th"))
             torch.save(self.alpha_logits.detach().cpu(), os.path.join(path, "alpha_weights.th"))
-            LOG.info(f"[Learner] Saved BNE models to {path}")
+            self.logger.info(f"[Learner] Saved BNE models to {path}")
         else:
             # Legacy mode: save single belief network
             torch.save(self.mac.agent.belief_network.state_dict(), os.path.join(path, "belief_network.th"))
             torch.save(self.mac.belief_encoder.state_dict(), os.path.join(path, "belief_encoder.th"))
             torch.save(self.mixer.state_dict(), os.path.join(path, "mixer.th"))
             torch.save(self.alpha_logits.detach().cpu(), os.path.join(path, "alpha_weights.th"))
-            LOG.info(f"[Learner] Saved legacy models to {path}")
+            self.logger.info(f"[Learner] Saved legacy models to {path}")
 
     def load_models(self, path: str):
         if self.bne_enabled:
@@ -699,7 +699,7 @@ class ECONLearner:
             alpha_path = os.path.join(path, "alpha_weights.th")
             if os.path.exists(alpha_path):
                 self.alpha_logits.data = torch.load(alpha_path, map_location=self.device).to(self.device)
-            LOG.info(f"[Learner] Loaded BNE models from {path}")
+            self.logger.info(f"[Learner] Loaded BNE models from {path}")
         else:
             # Legacy mode: load single belief network
             self.mac.agent.belief_network.load_state_dict(torch.load(os.path.join(path, "belief_network.th"), map_location=self.device))
@@ -710,4 +710,4 @@ class ECONLearner:
             alpha_path = os.path.join(path, "alpha_weights.th")
             if os.path.exists(alpha_path):
                 self.alpha_logits.data = torch.load(alpha_path, map_location=self.device).to(self.device)
-            LOG.info(f"[Learner] Loaded legacy models from {path}")
+            self.logger.info(f"[Learner] Loaded legacy models from {path}")

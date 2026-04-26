@@ -243,7 +243,7 @@ class LLMTransformerAgent(nn.Module):
             return default
 
         exec_model = _get_opt("executor_model", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
-        api_key = _get_opt("together_api_key", None)
+        api_key = _get_opt("llm_api_key", None)
         rep_penalty_default = float(getattr(args, "repetition_penalty_default", 1.1))
 
         self.llm_wrapper = ImprovedLLMWrapper(

@@ -114,7 +114,7 @@ class LLMTransformerAgent(nn.Module):
         
         # Initialize LLM wrapper
         self.llm_wrapper = ImprovedLLMWrapper(
-            api_key=args.together_api_key,
+            api_key=args.llm_api_key,
             model_name=args.executor_model,
             belief_dim=args.belief_dim
         )

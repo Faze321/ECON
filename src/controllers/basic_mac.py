@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from loguru import logger
 from transformers import AutoTokenizer
 
 from modules.agents.transformer_agent import LLMTransformerAgent
@@ -30,7 +29,7 @@ class LLMBasicMAC:
         1) Generate STRATEGY & FORMAT (no numbers)
         2) Aggregate executors to produce COMMITMENT (only \\boxed{<number>})
     """
-    def __init__(self, scheme: Dict, groups: Dict, args: Any):
+    def __init__(self, scheme: Dict, groups: Dict, args: Any, logger):
         self.args = args
         self.n_agents = args.n_agents
         self.n_actions = args.n_actions
@@ -38,13 +37,14 @@ class LLMBasicMAC:
         self.memory_dim = int(getattr(args, "memory_dim", getattr(args, "belief_dim", 128) + 5))
         use_cuda = getattr(args.system, "use_cuda", False) and torch.cuda.is_available()
         self.device = torch.device("cuda" if use_cuda else "cpu")
+        self.logger = logger
 
         model_name = getattr(args, "llm_model_name", "gpt2")
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
-            logger.info(f"[MAC] Loaded tokenizer for {model_name}")
+            self.logger.info(f"[MAC] Loaded tokenizer for {model_name}")
         except Exception as e:
-            logger.warning(f"[MAC] Load tokenizer failed: {e}; using fallback minimal tokenizer")
+            self.logger.warning(f"[MAC] Load tokenizer failed: {e}; using fallback minimal tokenizer")
             self.tokenizer = self._create_minimal_tokenizer()
         if getattr(self.tokenizer, "pad_token", None) is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -61,7 +61,7 @@ class LLMBasicMAC:
         # BNE: K individual Belief Policy Networks
         self.bne_enabled = getattr(getattr(args, "bne", object()), "enabled", False)
         if self.bne_enabled:
-            logger.info(f"[MAC] BNE enabled: creating {self.n_agents} independent policy networks")
+            self.logger.info(f"[MAC] BNE enabled: creating {self.n_agents} independent policy networks")
             entity_dim = getattr(args.arch, "entity_dim", 256)
             self.policy_networks = nn.ModuleList([
                 BeliefPolicyNetwork(
@@ -93,14 +93,14 @@ class LLMBasicMAC:
                 max_delta=0.3
             ).to(self.device)
 
-            logger.info(f"[MAC] BNE components initialized:")
-            logger.info(f"  - Policy networks: {sum(sum(p.numel() for p in net.parameters()) for net in self.policy_networks)} params")
-            logger.info(f"  - Refine module: {sum(p.numel() for p in self.refine_module.parameters())} params")
+            self.logger.info(f"[MAC] BNE components initialized:")
+            self.logger.info(f"  - Policy networks: {sum(sum(p.numel() for p in net.parameters()) for net in self.policy_networks)} params")
+            self.logger.info(f"  - Refine module: {sum(p.numel() for p in self.refine_module.parameters())} params")
 
             # Still need LLM agent for text generation (but not its belief network)
             self.agent = LLMTransformerAgent(input_shape=max_token_len, args=self.args)
         else:
-            logger.info("[MAC] BNE disabled: using legacy single agent")
+            self.logger.info("[MAC] BNE disabled: using legacy single agent")
             self._build_agents(max_token_len)
             self.commitment_dim = int(getattr(args, "commitment_embedding_dim", 768))
 
@@ -114,7 +114,7 @@ class LLMBasicMAC:
         self.action_selector = action_REGISTRY[getattr(args, "action_selector", "multinomial")](args)
 
         self.coordinator = ImprovedLLMWrapper(
-            api_key=args.together_api_key,
+            api_key=args.llm_api_key,
             model_name=args.coordinator_model,
             belief_dim=args.belief_dim,
             debug=getattr(args, "debug", False)
@@ -128,7 +128,7 @@ class LLMBasicMAC:
             device=self.device
         ).to(self.device)
         self.commitment_embedder = CommitmentEmbedder(args, LLMConfig(
-            api_key=args.together_api_key,
+            api_key=args.llm_api_key,
             model_name=args.coordinator_model,
             debug=getattr(args, "debug", False)
         ))
@@ -278,7 +278,7 @@ class LLMBasicMAC:
                 pe = self._apply_discrete_to_prompt(pe, chosen_actions)
                 agent_info["prompt_embeddings"] = pe
             except Exception as ex:
-                logger.warning(f"[MAC] apply discrete->prompt failed: {ex}")
+                self.logger.warning(f"[MAC] apply discrete->prompt failed: {ex}")
 
         # Tie discrete actions to prompt embeddings via simple bins over [T_min, p_max] ranges
         prompt_embeds = agent_info.get("prompt_embeddings")
@@ -317,7 +317,7 @@ class LLMBasicMAC:
                                               float(getattr(self.args.sampling, "p_max", 0.95)))
                 agent_info["prompt_embeddings"] = e.detach().unsqueeze(0)  # (B=1,N,2)
             except Exception as ex:
-                logger.warning(f"[MAC] BNE refine skipped: {ex}")
+                self.logger.warning(f"[MAC] BNE refine skipped: {ex}")
 
 
         strategy_text = ""
@@ -373,19 +373,19 @@ class LLMBasicMAC:
                     "bne_iteration_history": bne_infer_data["iteration_history"]
                 })
 
-                logger.info(f"[BNE Infer] Completed {bne_infer_data['n_iterations']} iterations, converged={bne_infer_data['converged']}")
+                self.logger.info(f"[BNE Infer] Completed {bne_infer_data['n_iterations']} iterations, converged={bne_infer_data['converged']}")
 
             except Exception as e:
-                logger.warning(f"[BNE Infer] Multi-round BNE failed: {e}, falling back to normal flow")
+                self.logger.warning(f"[BNE Infer] Multi-round BNE failed: {e}, falling back to normal flow")
                 bne_infer_data = None
 
         if raw_observation_text is not None and bne_infer_data is None:
             strategy_text = strategy_override if strategy_override is not None else self._get_strategy_and_format(raw_observation_text)
             if not strategy_text or not strategy_text.strip():
-                logger.warning(f"[MAC] Strategy generation returned empty (got: {repr(strategy_text)}), using fallback")
+                self.logger.warning(f"[MAC] Strategy generation returned empty (got: {repr(strategy_text)}), using fallback")
                 strategy_text = "Break down the problem into steps and solve each part."
             else:
-                logger.debug(f"[MAC] Strategy generated: {strategy_text[:100]}...")
+                self.logger.debug(f"[MAC] Strategy generated: {strategy_text[:100]}...")
             e_now = agent_info["prompt_embeddings"][0]  # (N,2)
             for i in range(self.n_agents):
                 try:
@@ -401,7 +401,7 @@ class LLMBasicMAC:
                         top_p=p_i
                     )
                 except Exception as e:
-                    logger.warning(f"Executor {i} failed: {e}")
+                    self.logger.warning(f"Executor {i} failed: {e}")
                     resp = ""
                 resp = self._post_sanitize_text(resp)
                 resp = self._ensure_boxed_format(resp)
@@ -415,7 +415,7 @@ class LLMBasicMAC:
             try:
                 commitment_embed = self._encode_commitment_vector(commitment_text).to(self.device)
             except Exception as e:
-                logger.warning(f"Commitment embedding failed: {e}")
+                self.logger.warning(f"Commitment embedding failed: {e}")
                 commitment_embed = None
 
 
@@ -471,7 +471,7 @@ class LLMBasicMAC:
             e[..., 1] = torch.clamp(e[..., 1], p_min, p_max)
             return e
         except Exception as ex:
-            logger.warning(f"[MAC] Discrete→prompt mapping failed: {ex}")
+            self.logger.warning(f"[MAC] Discrete→prompt mapping failed: {ex}")
             return prompt_embeddings
     def run_bne_refinement(
         self,
@@ -651,7 +651,7 @@ class LLMBasicMAC:
             commitment_text_history.append(normalized_commitment_new)
 
             if self._has_commitment_converged(commitment, commitment_new, commitment_emb, commitment_emb_new):
-                logger.info(f"[BNE {mode}] Converged at iteration {iteration+1}: commitment equivalent")
+                self.logger.info(f"[BNE {mode}] Converged at iteration {iteration+1}: commitment equivalent")
                 e_current = e_next
                 commitment = commitment_new
                 outputs = outputs_new
@@ -660,7 +660,7 @@ class LLMBasicMAC:
                 break
 
             if self._has_commitment_oscillated(commitment_emb_history, commitment_text_history):
-                logger.warning(f"[BNE {mode}] Oscillation detected at iteration {iteration+1}; terminating refinement")
+                self.logger.warning(f"[BNE {mode}] Oscillation detected at iteration {iteration+1}; terminating refinement")
                 e_current = e_next
                 commitment = commitment_new
                 outputs = outputs_new
@@ -669,7 +669,7 @@ class LLMBasicMAC:
                 break
 
             if convergence_eps > 0 and delta_magnitude < convergence_eps:
-                logger.info(f"[BNE {mode}] Converged at iteration {iteration+1}: delta={delta_magnitude:.4f} < {convergence_eps}")
+                self.logger.info(f"[BNE {mode}] Converged at iteration {iteration+1}: delta={delta_magnitude:.4f} < {convergence_eps}")
                 e_current = e_next
                 commitment = commitment_new
                 outputs = outputs_new
@@ -778,7 +778,7 @@ class LLMBasicMAC:
                     top_p=p_i
                 )
             except Exception as e:
-                logger.warning(f"[BNE] Executor {i} round 0 failed: {e}")
+                self.logger.warning(f"[BNE] Executor {i} round 0 failed: {e}")
                 resp = ""
             resp = self._post_sanitize_text(resp)
             resp = self._ensure_boxed_format(resp)
@@ -792,7 +792,7 @@ class LLMBasicMAC:
         try:
             commitment_emb_0 = self._encode_commitment_vector(commitment_0).to(self.device)
         except Exception as e:
-            logger.warning(f"[BNE] Commitment_0 embedding failed: {e}")
+            self.logger.warning(f"[BNE] Commitment_0 embedding failed: {e}")
             commitment_emb_0 = torch.zeros(self.output_encoder.dim, device=self.device)
         commitment_emb_0 = self._ensure_vector_dim(commitment_emb_0, self.commitment_dim)
 
@@ -837,7 +837,7 @@ class LLMBasicMAC:
                     top_p=p_i
                 )
             except Exception as e:
-                logger.warning(f"[BNE] Executor {i} round 1 failed: {e}")
+                self.logger.warning(f"[BNE] Executor {i} round 1 failed: {e}")
                 resp = ""
             resp = self._post_sanitize_text(resp)
             resp = self._ensure_boxed_format(resp)
@@ -852,7 +852,7 @@ class LLMBasicMAC:
         try:
             commitment_emb_final = self._encode_commitment_vector(commitment_final).to(self.device)
         except Exception as e:
-            logger.warning(f"[BNE] Commitment_final embedding failed: {e}")
+            self.logger.warning(f"[BNE] Commitment_final embedding failed: {e}")
             commitment_emb_final = torch.zeros(self.output_encoder.dim, device=self.device)
         commitment_emb_final = self._ensure_vector_dim(commitment_emb_final, self.commitment_dim)
 
@@ -1025,7 +1025,7 @@ class LLMBasicMAC:
             })
 
             if self._has_commitment_converged(commitment_prev, commitment_new, commitment_emb_prev, commitment_emb_new):
-                logger.info(f"[BNE Infer] Converged at iteration {iter_idx+1}: commitment equivalent")
+                self.logger.info(f"[BNE Infer] Converged at iteration {iter_idx+1}: commitment equivalent")
                 converged = True
                 commitment_prev = commitment_new
                 commitment_emb_prev = commitment_emb_new
@@ -1034,7 +1034,7 @@ class LLMBasicMAC:
                 break
 
             if self._has_commitment_oscillated(commitment_emb_history, commitment_text_history):
-                logger.warning(f"[BNE Infer] Oscillation detected at iteration {iter_idx+1}; terminating refinement")
+                self.logger.warning(f"[BNE Infer] Oscillation detected at iteration {iter_idx+1}; terminating refinement")
                 commitment_prev = commitment_new
                 commitment_emb_prev = commitment_emb_new
                 output_embs_prev = output_embs_new
@@ -1042,7 +1042,7 @@ class LLMBasicMAC:
                 break
 
             if delta_magnitude < convergence_threshold:
-                logger.info(f"[BNE Infer] Converged at iteration {iter_idx+1}: delta={delta_magnitude:.4f} < {convergence_threshold}")
+                self.logger.info(f"[BNE Infer] Converged at iteration {iter_idx+1}: delta={delta_magnitude:.4f} < {convergence_threshold}")
                 converged = True
                 commitment_prev = commitment_new
                 commitment_emb_prev = commitment_emb_new

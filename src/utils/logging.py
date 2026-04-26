@@ -90,7 +90,8 @@ class Logger:
 
         handler = logging.FileHandler(
             log_dir / f"{name}.log",
-            mode='a'
+            mode='a',
+            encoding='utf-8'
         )
         handler.setFormatter(formatter)
 
@@ -130,7 +131,7 @@ class Logger:
             self.tb_writer.add_scalar(key, value, t)
             
         # Log to metrics file
-        with open(self.metric_log_path, 'a') as f:
+        with open(self.metric_log_path, 'a', encoding='utf-8') as f:
             log_entry = {
                 'time': datetime.now().isoformat(),
                 'step': t,
@@ -265,7 +266,7 @@ class Logger:
         """
         # Log to file
         output_log_path = self.log_dir / "llm_outputs.jsonl"
-        with open(output_log_path, 'a') as f:
+        with open(output_log_path, 'a', encoding='utf-8') as f:
             log_entry = {
                 'time': datetime.now().isoformat(),
                 'step': step,

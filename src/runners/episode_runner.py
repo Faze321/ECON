@@ -7,16 +7,15 @@ import torch
 import numpy as np
 
 from components.episode_buffer import EpisodeBatch
-from utils.logging import get_logger
 
 from envs.huggingface_dataset_env import HuggingFaceDatasetEnv
 
 
 class EpisodeRunner:
 
-    def __init__(self, args: SimpleNamespace, logger=None):
+    def __init__(self, args: SimpleNamespace, logger):
         self.args = args
-        self.logger = logger or get_logger()
+        self.logger = logger
         self.alpha_provider = None
 
       
@@ -26,7 +25,7 @@ class EpisodeRunner:
 
         
         env_kwargs = vars(args.env_args) if hasattr(args, "env_args") else {}
-        self.env = HuggingFaceDatasetEnv(**env_kwargs)
+        self.env = HuggingFaceDatasetEnv(logger=self.logger, **env_kwargs)
 
 
         self.scheme = None

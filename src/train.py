@@ -62,13 +62,14 @@ def load_config(config_path: str) -> SimpleNamespace:
 
 
     if isinstance(expanded, dict):
-        root_key = expanded.get("together_api_key") or ""
-        llm_key = expanded.get("llm", {}).get("together_api_key") if isinstance(expanded.get("llm"), dict) else ""
+        root_key = expanded.get("llm_api_key") or ""
+        llm_cfg = expanded.get("llm", {}) if isinstance(expanded.get("llm"), dict) else {}
+        llm_key = llm_cfg.get("llm_api_key") or ""
         effective = (root_key or llm_key or "").strip()
         if "llm" not in expanded:
             expanded["llm"] = {}
-        expanded["together_api_key"] = effective
-        expanded["llm"]["together_api_key"] = effective
+        expanded["llm_api_key"] = effective
+        expanded["llm"]["llm_api_key"] = effective
 
     return _dict_to_namespace(expanded)
 
@@ -85,10 +86,10 @@ def update_config_with_args(config: SimpleNamespace, args: Any) -> SimpleNamespa
         config.logging.experiment_name = args.experiment_name
     if getattr(args, "log_dir", None) and hasattr(config, 'logging'):
         config.logging.log_path = args.log_dir
-    if getattr(args, "api_key", None):
-        config.together_api_key = args.api_key
+    if getattr(args, "llm_api_key", None):
+        config.llm_api_key = args.llm_api_key
         if hasattr(config, 'llm'):
-            config.llm.together_api_key = args.api_key
+            config.llm.llm_api_key = args.llm_api_key
     if getattr(args, "seed", None) and hasattr(config, 'system'):
         config.system.seed = args.seed
     if getattr(args, "env", None):
@@ -109,8 +110,7 @@ def update_config_with_args(config: SimpleNamespace, args: Any) -> SimpleNamespa
 # ------------------------
 # Setup
 # ------------------------
-def setup_experiment(config: SimpleNamespace):
-    logger = get_logger()
+def setup_experiment(config: SimpleNamespace, logger):
     logger.info("Setting up experiment environment...")
 
     # seeds
@@ -178,7 +178,7 @@ def setup_experiment(config: SimpleNamespace):
     groups = {"agents": n_agents}
 
 
-    mac = mac_REGISTRY[config.mac](scheme, groups, config)
+    mac = mac_REGISTRY[config.mac](scheme, groups, config, logger)
 
 
     runner.setup(scheme, groups, None, mac)
@@ -204,7 +204,7 @@ def run_training(config: SimpleNamespace, runner, learner, logger, device):
     # CSV 
     csv_path = log_dir / 'training_metrics.csv'
     if not csv_path.exists():
-        with open(csv_path, 'w') as f:
+        with open(csv_path, 'w', encoding='utf-8') as f:
             f.write('episode,t_env,'
                     'loss_total,loss_belief,loss_encoder,loss_mixer,'
                     'mixer_L_TD_tot,mixer_L_cons,mixer_L_align,'
