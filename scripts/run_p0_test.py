@@ -4,7 +4,6 @@ import sys
 import json
 import argparse
 from pathlib import Path
-from codecarbon import EmissionsTracker
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 _SCRIPT_DIR = os.path.dirname(__file__)
@@ -325,9 +324,6 @@ def main():
     Path(args.log_dir).mkdir(exist_ok=True)
     Path(args.model_dir).mkdir(exist_ok=True)
 
-    carbon_tracker = EmissionsTracker(output_dir=args.log_dir)
-    carbon_tracker.start()
-
     from utils.logging import get_logger
     logger = get_logger(args.log_dir)
 
@@ -338,11 +334,6 @@ def main():
     # Run testing with BNE
     run_testing(args.config, args.test_eps, 3, args.log_dir, args.model_dir, "bne_3rounds", logger)
 
-    carbon_tracker.stop()
-    data = carbon_tracker.final_emissions_data
-
-    print("CO2 (kg):", data.emissions)
-    print("Energy (kWh):", data.energy_consumed)
 
 if __name__ == '__main__':
     main()
