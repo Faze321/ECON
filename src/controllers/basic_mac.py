@@ -141,6 +141,42 @@ class LLMBasicMAC:
         self.eval_correct_count = 0
         self.eval_total_count = 0
 
+    def reset_token_usage(self):
+        for wrapper in self._usage_wrappers().values():
+            if hasattr(wrapper, "reset_usage"):
+                wrapper.reset_usage()
+
+    def get_token_usage(self) -> Dict[str, Dict[str, int]]:
+        usage = {}
+        for name, wrapper in self._usage_wrappers().items():
+            if hasattr(wrapper, "get_usage_summary"):
+                usage[name] = wrapper.get_usage_summary()
+            else:
+                usage[name] = self._empty_token_usage()
+
+        total = self._empty_token_usage()
+        for item in usage.values():
+            for key in total:
+                total[key] += int(item.get(key, 0))
+        usage["total"] = total
+        return usage
+
+    def _usage_wrappers(self) -> Dict[str, Any]:
+        wrappers = {}
+        if hasattr(self, "agent") and hasattr(self.agent, "llm_wrapper"):
+            wrappers["agents"] = self.agent.llm_wrapper
+        if hasattr(self, "coordinator"):
+            wrappers["coordinator"] = self.coordinator
+        return wrappers
+
+    def _empty_token_usage(self) -> Dict[str, int]:
+        return {
+            "requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
     def _build_agents(self, max_token_len: int):
         self.agent = LLMTransformerAgent(input_shape=max_token_len, args=self.args)
 

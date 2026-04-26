@@ -105,6 +105,8 @@ class EpisodeRunner:
         last_env_info = {}
         mac_info: Dict[str, Any] = {}
         bne_graph_data = None
+        if hasattr(self.mac, "reset_token_usage"):
+            self.mac.reset_token_usage()
 
         for t in range(episode_limit):
             steps_run = t + 1
@@ -402,6 +404,7 @@ class EpisodeRunner:
         r_ts_val = float(last_env_info.get("reward_ts", 0.0)) if last_env_info else 0.0
         r_cc_val = float(last_env_info.get("reward_cc", 0.0)) if last_env_info else 0.0
         is_correct_flag = bool(last_env_info.get("is_correct", False)) if last_env_info else False
+        token_usage = self.mac.get_token_usage() if hasattr(self.mac, "get_token_usage") else {}
 
         self._last_trace = {
             "episode": int(self._episode_idx),
@@ -420,6 +423,7 @@ class EpisodeRunner:
             "t_env": int(self._t_env),
             "test_mode": bool(test_mode),
             "rounds": steps_run,
+            "token_usage": token_usage,
             "trajectory": trajectories,
         }
 

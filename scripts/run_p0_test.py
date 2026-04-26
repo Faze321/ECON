@@ -4,6 +4,7 @@ import sys
 import json
 import argparse
 from pathlib import Path
+from codecarbon import EmissionsTracker
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 _SCRIPT_DIR = os.path.dirname(__file__)
@@ -71,15 +72,58 @@ def run_training(config_file, episodes, log_dir, model_dir, logger):
         correct = sum(1 for t in trace_records if t.get('is_correct'))
         total = len(trace_records)
         acc = correct / total * 100 if total else 0.0
+        token_usage_summary = {
+            'agents': {
+                'prompt_tokens': 0,
+                'completion_tokens': 0,
+                'total_tokens': 0,
+                'requests': 0,
+            },
+            'coordinator': {
+                'prompt_tokens': 0,
+                'completion_tokens': 0,
+                'total_tokens': 0,
+                'requests': 0,
+            },
+            'total': {
+                'requests': 0,
+                'prompt_tokens': 0,
+                'completion_tokens': 0,
+                'total_tokens': 0,
+            },
+        }
+        for trace in trace_records:
+            token_usage = trace.get('token_usage', {}) if isinstance(trace, dict) else {}
+            for role in ('agents', 'coordinator'):
+                role_usage = token_usage.get(role, {})
+                token_usage_summary[role]['prompt_tokens'] += int(role_usage.get('prompt_tokens', 0))
+                token_usage_summary[role]['completion_tokens'] += int(role_usage.get('completion_tokens', 0))
+                token_usage_summary[role]['total_tokens'] += int(role_usage.get('total_tokens', 0))
+                token_usage_summary[role]['requests'] += int(role_usage.get('requests', 0))
+        token_usage_summary['total']['requests'] = (
+            token_usage_summary['agents']['requests'] + token_usage_summary['coordinator']['requests']
+        )
+        token_usage_summary['total']['prompt_tokens'] = (
+            token_usage_summary['agents']['prompt_tokens'] + token_usage_summary['coordinator']['prompt_tokens']
+        )
+        token_usage_summary['total']['completion_tokens'] = (
+            token_usage_summary['agents']['completion_tokens'] + token_usage_summary['coordinator']['completion_tokens']
+        )
+        token_usage_summary['total']['total_tokens'] = (
+            token_usage_summary['agents']['total_tokens'] + token_usage_summary['coordinator']['total_tokens']
+        )
         trace_records.append({
             'record_type': 'train_summary',
             'correct': correct,
             'total': total,
-            'accuracy': acc,
+            'accuracy': f"{acc:.1f}%",
+            'token_usage': token_usage_summary,
         })
         with open(trace_path, 'w', encoding='utf-8') as f:
             json.dump(trace_records, f, indent=2, ensure_ascii=False)
         logger.info(f"\nTrain accuracy: {correct}/{total} = {acc:.1f}%")
+        logger.info(f"Train agent tokens: {token_usage_summary['agents']['total_tokens']}")
+        logger.info(f"Train total LLM tokens: {token_usage_summary['total']['total_tokens']}")
 
 def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag, logger):
  
@@ -194,18 +238,61 @@ def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag, logg
 
     total = len(traces)
     acc = correct / total * 100 if total else 0.0
+    token_usage_summary = {
+        'agents': {
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+            'requests': 0,
+        },
+        'coordinator': {
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+            'requests': 0,
+        },
+        'total': {
+            'requests': 0,
+            'prompt_tokens': 0,
+            'completion_tokens': 0,
+            'total_tokens': 0,
+        },
+    }
+    for trace in traces:
+        token_usage = trace.get('token_usage', {}) if isinstance(trace, dict) else {}
+        for role in ('agents', 'coordinator'):
+            role_usage = token_usage.get(role, {})
+            token_usage_summary[role]['prompt_tokens'] += int(role_usage.get('prompt_tokens', 0))
+            token_usage_summary[role]['completion_tokens'] += int(role_usage.get('completion_tokens', 0))
+            token_usage_summary[role]['total_tokens'] += int(role_usage.get('total_tokens', 0))
+            token_usage_summary[role]['requests'] += int(role_usage.get('requests', 0))
+    token_usage_summary['total']['requests'] = (
+        token_usage_summary['agents']['requests'] + token_usage_summary['coordinator']['requests']
+    )
+    token_usage_summary['total']['prompt_tokens'] = (
+        token_usage_summary['agents']['prompt_tokens'] + token_usage_summary['coordinator']['prompt_tokens']
+    )
+    token_usage_summary['total']['completion_tokens'] = (
+        token_usage_summary['agents']['completion_tokens'] + token_usage_summary['coordinator']['completion_tokens']
+    )
+    token_usage_summary['total']['total_tokens'] = (
+        token_usage_summary['agents']['total_tokens'] + token_usage_summary['coordinator']['total_tokens']
+    )
     traces.append({
         'record_type': 'test_summary',
         'correct': correct,
         'total': total,
-        'accuracy': acc,
+        'accuracy': f"{acc:.1f}%",
+        'token_usage': token_usage_summary,
     })
 
     trace_path = os.path.join(log_dir, f'llm_traces_test_{tag}.json')
     with open(trace_path, 'w', encoding='utf-8') as f:
         json.dump(traces, f, indent=2, ensure_ascii=False)
 
-    logger.info(f"\n ({tag}): {correct}/{len(traces)} = {acc:.1f}%")
+    logger.info(f"\n ({tag}): {correct}/{total} = {acc:.1f}%")
+    logger.info(f"Test agent tokens ({tag}): {token_usage_summary['agents']['total_tokens']}")
+    logger.info(f"Test total LLM tokens ({tag}): {token_usage_summary['total']['total_tokens']}")
 
     if bne_rounds > 0 and traces:
         has_meta = sum(1 for t in traces if 'commitment_metadata' in t)
@@ -238,6 +325,9 @@ def main():
     Path(args.log_dir).mkdir(exist_ok=True)
     Path(args.model_dir).mkdir(exist_ok=True)
 
+    carbon_tracker = EmissionsTracker(output_dir=args.log_dir)
+    carbon_tracker.start()
+
     from utils.logging import get_logger
     logger = get_logger(args.log_dir)
 
@@ -247,6 +337,12 @@ def main():
 
     # Run testing with BNE
     run_testing(args.config, args.test_eps, 3, args.log_dir, args.model_dir, "bne_3rounds", logger)
+
+    carbon_tracker.stop()
+    data = carbon_tracker.final_emissions_data
+
+    print("CO2 (kg):", data.emissions)
+    print("Energy (kWh):", data.energy_consumed)
 
 if __name__ == '__main__':
     main()

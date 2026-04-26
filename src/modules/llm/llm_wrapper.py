@@ -64,6 +64,8 @@ class ImprovedLLMWrapper:
         )
         # 仅为接口兼容保留
         self.belief_dim = belief_dim
+        self.last_usage = self._empty_usage()
+        self.usage_history = []
         masked = (api_key[:4] + "*" * max(0, len(api_key) - 8) + api_key[-4:]) if api_key else "(empty)"
         logger.info(f"[APIHandler] OpenRouter API key resolved: {masked}")
 
@@ -106,6 +108,7 @@ class ImprovedLLMWrapper:
                     time.sleep(min(1.5 * (attempt + 1), 6.0))
                     continue
                 data = resp.json()
+                self._record_usage(data.get("usage", {}))
                 text = (data.get("choices", [{}])[0]
                             .get("message", {})
                             .get("content", "")).strip()
@@ -123,6 +126,35 @@ class ImprovedLLMWrapper:
     # ---------------------- helpers ----------------------
     def _pick(self, val, default):
         return default if val is None else val
+
+    def reset_usage(self):
+        self.last_usage = self._empty_usage()
+        self.usage_history = []
+
+    def get_usage_summary(self) -> Dict[str, int]:
+        summary = self._empty_usage()
+        summary["requests"] = len(self.usage_history)
+        for usage in self.usage_history:
+            summary["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            summary["completion_tokens"] += usage.get("completion_tokens", 0)
+            summary["total_tokens"] += usage.get("total_tokens", 0)
+        return summary
+
+    def _empty_usage(self) -> Dict[str, int]:
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+
+    def _record_usage(self, raw_usage: Optional[Dict[str, Any]]):
+        usage = self._empty_usage()
+        if isinstance(raw_usage, dict):
+            usage["prompt_tokens"] = int(raw_usage.get("prompt_tokens") or 0)
+            usage["completion_tokens"] = int(raw_usage.get("completion_tokens") or 0)
+            usage["total_tokens"] = int(raw_usage.get("total_tokens") or 0)
+        self.last_usage = usage
+        self.usage_history.append(usage)
 
     def _postprocess_text(self, s: str) -> str:
         """
