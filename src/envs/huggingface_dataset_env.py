@@ -37,8 +37,9 @@ class HuggingFaceDatasetEnv(gym.Env):
         from types import SimpleNamespace as _SNS
         _reward_cfg = kwargs.get("reward_config", kwargs.get("reward", {}))
         self.reward_args = _SNS(**_reward_cfg) if isinstance(_reward_cfg, dict) else _reward_cfg
+        self.compute_reward = bool(kwargs.get("compute_reward", getattr(self.reward_args, "compute_reward", True)))
 
-        # Reward weights fall back to the training-time α definition (r = α·[AL, TS, CC])
+        # Reward weights are only used when compute_reward=True.
         _alpha_init = []
         if hasattr(self.reward_args, "initial_weights"):
             _alpha_init = list(getattr(self.reward_args, "initial_weights", []))
@@ -89,17 +90,20 @@ class HuggingFaceDatasetEnv(gym.Env):
         self.episode_limit = int(self.max_rounds) if self.max_rounds and self.max_rounds > 0 else 1
         self.round_history: List[Dict[str, Any]] = []
 
-        # Embedding utilities for reward calculation
+        # Embedding utilities for optional reward calculation.
         self._embedding_cache: Dict[str, torch.Tensor] = {}
-        try:
-            self.output_encoder = OutputEncoder(
-                embedding_dim=getattr(self.reward_args, "commitment_embedding_dim", 1024),
-                model_name=getattr(self.reward_args, "commitment_embedding_model_name", "BAAI/bge-large-en-v1.5"),
-                device=torch.device("cpu"),
-            )
-        except Exception as e:
+        if not self.compute_reward:
             self.output_encoder = None
-            self.logger.warning(f"[Env] OutputEncoder init failed; AL/CC rewards will fallback to 0. Error: {e}")
+        else:
+            try:
+                self.output_encoder = OutputEncoder(
+                    embedding_dim=getattr(self.reward_args, "commitment_embedding_dim", 1024),
+                    model_name=getattr(self.reward_args, "commitment_embedding_model_name", "BAAI/bge-large-en-v1.5"),
+                    device=torch.device("cpu"),
+                )
+            except Exception as e:
+                self.output_encoder = None
+                self.logger.warning(f"[Env] OutputEncoder init failed; AL/CC rewards will fallback to 0. Error: {e}")
 
         if self.use_dataset_episode:
             self.step_count = 0
@@ -351,28 +355,34 @@ class HuggingFaceDatasetEnv(gym.Env):
                 is_correct = (pred_num == gt_num)
 
         reward_ts = 1.0 if is_correct else 0.0
-        reward_al = self._calculate_action_likelihood_reward(extra_info, pred_num)
-        reward_cc = self._calculate_collaborative_contribution_reward(extra_info, pred_num, is_correct)
+        reward_al = 0.0
+        reward_cc = 0.0
 
-        alpha_weights = self._resolve_alpha_weights(extra_info)
-        action_bonus = self._action_bonus_from_prompts(extra_info)
+        alpha_weights = [0.0, 1.0, 0.0]
+        action_bonus = 1.0
+        if self.compute_reward:
+            reward_al = self._calculate_action_likelihood_reward(extra_info, pred_num)
+            reward_cc = self._calculate_collaborative_contribution_reward(extra_info, pred_num, is_correct)
+            alpha_weights = self._resolve_alpha_weights(extra_info)
+            action_bonus = self._action_bonus_from_prompts(extra_info)
 
         total_reward = (
             alpha_weights[0] * reward_al
             + alpha_weights[1] * reward_ts
             + alpha_weights[2] * reward_cc
         )
-        # Nudging reward with prompt embeddings so [T, p] directly affect the return
+        # When compute_reward=False, total_reward is just the correctness score.
         total_reward = float(max(0.0, min(1.0, total_reward * (0.8 + 0.2 * action_bonus))))
 
-        self.logger.info(f"   REWARD BREAKDOWN:")
-        self.logger.info(f"   α = {alpha_weights}")
-        self.logger.info(f"   TS (Task-Specific): {reward_ts:.3f} * {alpha_weights[1]:.2f} = {reward_ts * alpha_weights[1]:.3f}")
-        self.logger.info(f"   AL (Action Likelihood): {reward_al:.3f} * {alpha_weights[0]:.2f} = {reward_al * alpha_weights[0]:.3f}")
-        self.logger.info(f"   CC (Collaborative): {reward_cc:.3f} * {alpha_weights[2]:.2f} = {reward_cc * alpha_weights[2]:.3f}")
-        self.logger.info(f"   ACTION BONUS (from [T,p]): {action_bonus:.3f}")
-        self.logger.info(f"   TOTAL REWARD: {total_reward:.3f}")
-        self.logger.info("=" * 80)
+        if self.compute_reward:
+            self.logger.info(f"   REWARD BREAKDOWN:")
+            self.logger.info(f"   alpha = {alpha_weights}")
+            self.logger.info(f"   TS (Task-Specific): {reward_ts:.3f} * {alpha_weights[1]:.2f} = {reward_ts * alpha_weights[1]:.3f}")
+            self.logger.info(f"   AL (Action Likelihood): {reward_al:.3f} * {alpha_weights[0]:.2f} = {reward_al * alpha_weights[0]:.3f}")
+            self.logger.info(f"   CC (Collaborative): {reward_cc:.3f} * {alpha_weights[2]:.2f} = {reward_cc * alpha_weights[2]:.3f}")
+            self.logger.info(f"   ACTION BONUS (from [T,p]): {action_bonus:.3f}")
+            self.logger.info(f"   TOTAL REWARD: {total_reward:.3f}")
+            self.logger.info("=" * 80)
 
         terminated = (self.round_count >= self.episode_limit)
         truncated = False
