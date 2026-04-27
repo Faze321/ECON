@@ -175,13 +175,24 @@ class BaselineMAC:
         }
 
     def _get_strategy_and_format(self, question: str) -> str:
-        prompt = f"""You are the Coordinator in a 3-agent reasoning system.
+        prompt = f"""You are the Coordinator. Provide a clear, step-by-step STRATEGY for solving this math problem.
 
 Problem:
 {question}
 
-Write a concise strategy for solving the problem. Do not solve it yourself.
-End with a short instruction that each executor must finish with \\boxed{{answer}}.
+Your Response Format:
+
+STRATEGY:
+1. [First conceptual step ]
+2. [Second conceptual step ]
+3. [Final calculation approach ]
+
+EXECUTION RULES:
+- Show your reasoning for each step
+- End with exactly: \\boxed{{<final_number>}}
+- The number in \\boxed{{}} must be the complete final answer
+
+Keep your strategy clear and under 80 tokens.
 """
         out = self.coordinator.generate_response(
             prompt=prompt,
@@ -192,20 +203,26 @@ End with a short instruction that each executor must finish with \\boxed{{answer
         return self._post_sanitize_text(out)
 
     def _build_agent_prompt(self, question: str, strategy: str, agent_idx: int) -> str:
-        return f"""You are Executor Agent {agent_idx + 1} in a 3-agent reasoning system.
+        return f"""You are a specialist Executor agent within a collaborative team. Your work will be critically reviewed by a Coordinator to determine the final answer. Therefore, absolute clarity and accuracy are paramount.
 
 Problem:
 {question}
 
-Coordinator strategy:
+High-Level Strategy to Follow:
 {strategy}
 
-Solve independently. Show only the useful reasoning and put the final answer on the last line as \\boxed{{answer}}.
+Your Task:
+1.  **Adhere strictly to the Strategy**: Address each point in the strategy in order.
+2.  **Show Your Work**: For each step, explicitly state the numbers you are using and show the calculation (e.g., "Step 2: Calculate the total cost. 5 items * $3.50/item = $17.50").
+3.  **Self-Correction**: Before concluding, briefly double-check your arithmetic.
+4.  **Final Answer Format**: The final line of your entire response MUST be the answer enclosed in `\\boxed{{...}}`. Do not add any text after it.
+
+Begin your detailed solution now.
 """
 
     def _generate_commitment(self, question: str, strategy: str, responses: List[str]) -> str:
         formatted = "\n".join([f"Agent {idx + 1}: {text}" for idx, text in enumerate(responses)])
-        prompt = f"""You are the Coordinator. Aggregate the executor answers and return the final answer.
+        prompt = f"""You are the COORDINATOR. Review the question, strategy and all executor solutions to aggregate and produce a structured final answer.
 
 Problem:
 {question}
@@ -213,10 +230,36 @@ Problem:
 Strategy:
 {strategy}
 
-Executor answers:
+Executor Solutions (review each carefully):
 {formatted}
 
-Choose the best final answer. Return only the final answer in the format \\boxed{{answer}}.
+Your Task:
+1. Extract the final answer expression (numbers, fractions, radicals, units, or complex forms) from each executor's \boxed{{}} output
+2. Compare all answers - if they agree, use that answer
+3. If they disagree, analyze the reasoning to identify the mathematically correct answer
+4. Verify the arithmetic step-by-step for the chosen answer (re-derive if needed)
+5. If information is insufficient, return "undetermined" and explain briefly
+6. Output a JSON object with verification checklist
+
+Output Format (JSON only, no other text):
+{{
+  "final_value": "<answer expression or undetermined>",
+  "reasoning": "<1-sentence explanation>",
+  "confidence": <0.0-1.0>,
+  "checklist": {{
+    "all_agree": <true/false>,
+    "arithmetic_verified": <true/false>,
+    "units_correct": <true/false>
+  }}
+}}
+
+Critical Requirements:
+- Output MUST be valid JSON (no markdown code blocks)
+- "final_value" must exactly match the chosen answer (fractions, radicals, complex numbers, or units allowed)
+- If the answer is undetermined, set "final_value" to "undetermined" and "confidence" <= 0.2
+- Re-check the problem statement instead of guessing when executor work is incomplete
+- "confidence" should reflect agreement level (1.0 if all agree, lower if conflict or uncertainty)
+- Keep reasoning concise (max 20 words)
 """
         out = self.coordinator.generate_response(
             prompt=prompt,
