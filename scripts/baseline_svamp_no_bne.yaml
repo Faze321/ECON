@@ -24,9 +24,16 @@ llm:
   base_url: "https://openrouter.ai/api/v1"
   coordinator_model: "meta-llama/llama-3.3-70b-instruct"
   executor_model: "meta-llama/llama-3.1-8b-instruct"
-  strategy_max_tokens: 256
-  executor_max_tokens: 1024
-  commitment_max_tokens: 256
+  strategy_temperature: 0.3
+  strategy_top_p: 0.4
+  strategy_repetition_penalty: 1.1
+  strategy_max_tokens: 180
+  executor_max_tokens: 2048
+  executor_repetition_penalty: 1.05
+  commitment_temperature: 0.1
+  commitment_top_p: 0.3
+  commitment_repetition_penalty: 1.05
+  commitment_max_tokens: 150
   coordinator_temperature: 0.1
   coordinator_top_p: 0.9
   executor_temperature: 0.2

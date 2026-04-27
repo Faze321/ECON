@@ -29,6 +29,7 @@ class BaselineMAC:
         self.logger = logger
         self.n_agents = int(getattr(args, "n_agents", 3))
         self.n_actions = int(getattr(args, "n_actions", 2))
+        self._last_commitment_metadata = None
 
         use_cuda = getattr(args.system, "use_cuda", False) and torch.cuda.is_available()
         device_num = getattr(args.system, "device_num", 0)
@@ -157,6 +158,7 @@ class BaselineMAC:
                 prompt=prompt,
                 temperature=float(self._get_opt("executor_temperature", 0.2)),
                 top_p=float(self._get_opt("executor_top_p", 0.9)),
+                repetition_penalty=float(self._get_opt("executor_repetition_penalty", 1.05)),
                 max_tokens=int(self._get_opt("executor_max_tokens", 1024)),
             )
             executor_outputs.append(self._ensure_boxed_format(self._post_sanitize_text(text)))
@@ -172,6 +174,7 @@ class BaselineMAC:
             "strategy": strategy,
             "format": "",
             "selected_actions": chosen_actions.detach().clone(),
+            "commitment_metadata": self._last_commitment_metadata,
         }
 
     def _get_strategy_and_format(self, question: str) -> str:
@@ -196,9 +199,10 @@ Keep your strategy clear and under 80 tokens.
 """
         out = self.coordinator.generate_response(
             prompt=prompt,
-            temperature=float(self._get_opt("coordinator_temperature", 0.2)),
-            top_p=float(self._get_opt("coordinator_top_p", 0.9)),
-            max_tokens=int(self._get_opt("strategy_max_tokens", 256)),
+            temperature=float(self._get_opt("strategy_temperature", 0.3)),
+            top_p=float(self._get_opt("strategy_top_p", 0.4)),
+            repetition_penalty=float(self._get_opt("strategy_repetition_penalty", 1.1)),
+            max_tokens=int(self._get_opt("strategy_max_tokens", 180)),
         )
         return self._post_sanitize_text(out)
 
@@ -221,7 +225,7 @@ Begin your detailed solution now.
 """
 
     def _generate_commitment(self, question: str, strategy: str, responses: List[str]) -> str:
-        formatted = "\n".join([f"Agent {idx + 1}: {text}" for idx, text in enumerate(responses)])
+        formatted = "\n".join([f"Executor {idx + 1}: {text}" for idx, text in enumerate(responses)])
         prompt = f"""You are the COORDINATOR. Review the question, strategy and all executor solutions to aggregate and produce a structured final answer.
 
 Problem:
@@ -234,7 +238,7 @@ Executor Solutions (review each carefully):
 {formatted}
 
 Your Task:
-1. Extract the final answer expression (numbers, fractions, radicals, units, or complex forms) from each executor's \boxed{{}} output
+1. Extract the final answer expression (numbers, fractions, radicals, units, or complex forms) from each executor's \\boxed{{}} output
 2. Compare all answers - if they agree, use that answer
 3. If they disagree, analyze the reasoning to identify the mathematically correct answer
 4. Verify the arithmetic step-by-step for the chosen answer (re-derive if needed)
@@ -263,28 +267,96 @@ Critical Requirements:
 """
         out = self.coordinator.generate_response(
             prompt=prompt,
-            temperature=float(self._get_opt("coordinator_temperature", 0.1)),
-            top_p=float(self._get_opt("coordinator_top_p", 0.9)),
-            max_tokens=int(self._get_opt("commitment_max_tokens", 256)),
+            temperature=float(self._get_opt("commitment_temperature", 0.1)),
+            top_p=float(self._get_opt("commitment_top_p", 0.3)),
+            repetition_penalty=float(self._get_opt("commitment_repetition_penalty", 1.05)),
+            max_tokens=int(self._get_opt("commitment_max_tokens", 150)),
         )
-        return self._ensure_boxed_format(self._post_sanitize_text(out))
+        final_answer, metadata = self._parse_structured_commitment(self._post_sanitize_text(out))
+        self._last_commitment_metadata = metadata
+        return f"\\boxed{{{final_answer}}}"
+
+    def _parse_structured_commitment(self, raw_output: str) -> Tuple[str, Dict[str, Any]]:
+        import json
+
+        raw_output = str(raw_output or "")
+        metadata = {
+            "parse_method": "fallback",
+            "reasoning": "",
+            "confidence": 0.0,
+            "checklist": {},
+            "raw_output": raw_output[:200],
+        }
+
+        cleaned = raw_output.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            cleaned = "\n".join([line for line in lines if not line.strip().startswith("```")])
+
+        try:
+            data = json.loads(cleaned)
+            if isinstance(data, dict):
+                final_candidate = data.get("final")
+                if final_candidate is None:
+                    final_candidate = data.get("final_value")
+                if final_candidate is not None:
+                    final_raw = str(final_candidate).strip()
+                    final_norm = extract_answer_number(final_raw)
+                    final_out = final_norm if final_norm is not None else final_raw
+
+                    metadata["parse_method"] = "json"
+                    metadata["reasoning"] = data.get("reasoning", "")
+                    metadata["confidence"] = float(data.get("confidence", 0.5))
+                    metadata["checklist"] = data.get("checklist", {})
+                    return final_out, metadata
+        except (json.JSONDecodeError, ValueError, KeyError) as exc:
+            metadata["parse_error"] = str(exc)[:100]
+
+        boxed_content = self._extract_boxed_content(raw_output)
+        if boxed_content:
+            final_norm = extract_answer_number(boxed_content)
+            metadata["parse_method"] = "boxed"
+            return final_norm if final_norm is not None else boxed_content, metadata
+
+        final_value_match = re.search(r'"final(?:_value)?"\s*:\s*"([^"]+)"', raw_output)
+        if final_value_match:
+            extracted = final_value_match.group(1).strip()
+            final_norm = extract_answer_number(extracted)
+            metadata["parse_method"] = "json_field_regex"
+            return final_norm if final_norm is not None else extracted, metadata
+
+        nums = re.findall(r"[+-]?\d+(?:\.\d+)?", raw_output)
+        if nums:
+            num = extract_answer_number(nums[-1])
+            if num is not None:
+                metadata["parse_method"] = "regex"
+                return num, metadata
+
+        metadata["parse_method"] = "undetermined_fallback"
+        return "undetermined", metadata
 
     def _post_sanitize_text(self, text: str) -> str:
         if text is None:
             return ""
         text = str(text).replace("\x08", "\\b").replace("\x0c", "\\f")
-        return text.replace("\r\n", "\n").replace("\r", "\n")
+        return self._repair_boxed(text.replace("\r\n", "\n").replace("\r", "\n"))
 
     def _ensure_boxed_format(self, text: str) -> str:
-        text = str(text or "").strip()
-        boxed = self._extract_boxed_content(text)
-        if boxed:
-            return f"\\boxed{{{boxed}}}"
+        text = self._repair_boxed(str(text or "")).strip()
+        if "\\boxed{" in text:
+            return text
         candidate = extract_answer_number(text)
         if candidate is None:
-            nums = re.findall(r"[+-]?\d+(?:\.\d+)?", text)
-            candidate = nums[-1] if nums else "undetermined"
+            candidate = "undetermined"
+        if text:
+            return f"{text}\n\\boxed{{{candidate}}}"
         return f"\\boxed{{{candidate}}}"
+
+    def _repair_boxed(self, text: str) -> str:
+        text = str(text or "")
+        text = text.replace("\x08oxed{", "\\boxed{")
+        text = re.sub(r"(?<!\\)boxed\{", r"\\boxed{", text)
+        return text
 
     def _extract_boxed_content(self, text: str) -> Optional[str]:
         if not isinstance(text, str):

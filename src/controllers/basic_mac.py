@@ -1147,7 +1147,7 @@ Executor Solutions (review each carefully):
 {formatted}
 
 Your Task:
-1. Extract the final answer expression (numbers, fractions, radicals, units, or complex forms) from each executor's \boxed{{}} output
+1. Extract the final answer expression (numbers, fractions, radicals, units, or complex forms) from each executor's \\boxed{{}} output
 2. Compare all answers - if they agree, use that answer
 3. If they disagree, analyze the reasoning to identify the mathematically correct answer
 4. Verify the arithmetic step-by-step for the chosen answer (re-derive if needed)
