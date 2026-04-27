@@ -17,9 +17,9 @@ def main():
     if "--config" not in sys.argv:
         sys.argv.extend(["--config", os.path.join(SCRIPT_DIR, "config_svamp.yaml")])
     if "--log-dir" not in sys.argv:
-        sys.argv.extend(["--log-dir", os.path.join(SCRIPT_DIR, "logs_svamp")])
+        sys.argv.extend(["--log-dir", os.path.join(PROJECT_ROOT, "logs_svamp")])
     if "--model-dir" not in sys.argv:
-        sys.argv.extend(["--model-dir", os.path.join(SCRIPT_DIR, "models_svamp")])
+        sys.argv.extend(["--model-dir", os.path.join(PROJECT_ROOT, "models_svamp")])
     base_main()
 
 

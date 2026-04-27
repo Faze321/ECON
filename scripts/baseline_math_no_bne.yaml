@@ -3,7 +3,7 @@ mac: "baseline_mac"
 learner: "noop_learner"
 
 t_max: 10
-test_nepisode: 10
+test_nepisode: 100
 
 n_agents: 3
 n_actions: 2
@@ -34,11 +34,13 @@ llm:
 
 env: "huggingface_dataset_env"
 env_args:
-  hf_dataset_path: "gsm8k"
-  hf_dataset_config_name: "main"
+  hf_dataset_path: "DigitalLearningGmbH/MATH-lighteval"
+  hf_dataset_config_name: null
   dataset_split: "train"
+  question_field_name: null
+  answer_field_name: null
   compute_reward: false
-  max_question_length: 1024
+  max_question_length: 1536
   max_answer_length: 2048
   dataset_streaming: false
   use_random_sampling: false
@@ -49,6 +51,8 @@ env_args:
 
 env_args_test:
   dataset_split: "test"
+  question_field_name: null
+  answer_field_name: null
 
 bne:
   enabled: false
@@ -68,7 +72,7 @@ logging:
   log_interval: 1
   save_model: false
   save_model_interval: 1000000
-  log_path: "./logs_baseline_gsm8k"
-  experiment_name: "baseline_no_bne"
+  log_path: "./logs_math_no_bne"
+  experiment_name: "baseline_math_no_bne"
 
 use_replay: false

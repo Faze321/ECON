@@ -151,7 +151,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run no-BNE 1-coordinator + 3-agent baseline.")
     parser.add_argument("--config", default=os.path.join(_SCRIPT_DIR, "baseline_no_bne.yaml"))
     parser.add_argument("--test-eps", type=int, default=30, help="test episode")
-    parser.add_argument("--log-dir", default="logs_baseline_no_bne")
+    parser.add_argument("--log-dir", default="logs_baseline_gsm8k")
     args = parser.parse_args()
 
     run_baseline(args.config, args.test_eps, args.log_dir)

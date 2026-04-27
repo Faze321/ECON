@@ -10,16 +10,14 @@ src_path = os.path.join(PROJECT_ROOT, "src")
 if src_path not in sys.path:
     sys.path.append(src_path)
 
-from run_p0_test import main as base_main  # noqa: E402
+from run_baseline_no_bne import main as base_main  # noqa: E402
 
 
 def main():
     if "--config" not in sys.argv:
-        sys.argv.extend(["--config", os.path.join(SCRIPT_DIR, "config_math.yaml")])
+        sys.argv.extend(["--config", os.path.join(SCRIPT_DIR, "baseline_svamp_no_bne.yaml")])
     if "--log-dir" not in sys.argv:
-        sys.argv.extend(["--log-dir", os.path.join(PROJECT_ROOT, "logs_math")])
-    if "--model-dir" not in sys.argv:
-        sys.argv.extend(["--model-dir", os.path.join(PROJECT_ROOT, "models_math")])
+        sys.argv.extend(["--log-dir", os.path.join(PROJECT_ROOT, "logs_baseline_svamp")])
     base_main()
 
 

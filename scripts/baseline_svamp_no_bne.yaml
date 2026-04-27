@@ -3,7 +3,7 @@ mac: "baseline_mac"
 learner: "noop_learner"
 
 t_max: 10
-test_nepisode: 10
+test_nepisode: 100
 
 n_agents: 3
 n_actions: 2
@@ -11,7 +11,7 @@ belief_dim: 128
 batch_size_run: 1
 state_shape: 1024
 max_seq_length: 1024
-commitment_embedding_dim: 1024
+commitment_embedding_dim: 768
 
 llm_model_name: "gpt2"
 llm_api_key: "${OPENROUTER_API_KEY}"
@@ -34,11 +34,13 @@ llm:
 
 env: "huggingface_dataset_env"
 env_args:
-  hf_dataset_path: "gsm8k"
-  hf_dataset_config_name: "main"
+  hf_dataset_path: "ChilleD/SVAMP"
+  hf_dataset_config_name: null
   dataset_split: "train"
+  question_field_name: "question_concat"
+  answer_field_name: "answer"
   compute_reward: false
-  max_question_length: 1024
+  max_question_length: 768
   max_answer_length: 2048
   dataset_streaming: false
   use_random_sampling: false
@@ -49,6 +51,8 @@ env_args:
 
 env_args_test:
   dataset_split: "test"
+  question_field_name: "question_concat"
+  answer_field_name: "answer"
 
 bne:
   enabled: false
@@ -68,7 +72,7 @@ logging:
   log_interval: 1
   save_model: false
   save_model_interval: 1000000
-  log_path: "./logs_baseline_gsm8k"
-  experiment_name: "baseline_no_bne"
+  log_path: "./logs_svamp_no_bne"
+  experiment_name: "baseline_svamp_no_bne"
 
 use_replay: false

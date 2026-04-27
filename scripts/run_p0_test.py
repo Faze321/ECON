@@ -308,7 +308,7 @@ def main():
     parser = argparse.ArgumentParser(description='ECON')
     parser.add_argument('--train-eps', type=int, default=100, )
                   
-    parser.add_argument('--test-eps', type=int, default=10, help='test episode')
+    parser.add_argument('--test-eps', type=int, default=30, help='test episode')
     parser.add_argument('--config', default=os.path.join(_PROJECT_ROOT, 'scripts', 'config_p0.yaml'),
                       )
     parser.add_argument('--log-dir', default='logs_p0_test')
