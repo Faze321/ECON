@@ -8,7 +8,7 @@ sys.path.insert(0, "src")
 import yaml
 
 # Model directory to load (change this to your trained model path)
-MODEL_DIR = "./models_exp1/final"  # Using existing trained model
+MODEL_DIR = "./models_gsm8k/final"  # Using existing trained model
 
 
 def test(bne_rounds, tag):

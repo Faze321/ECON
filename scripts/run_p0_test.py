@@ -210,11 +210,12 @@ def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag, logg
     if hasattr(runner, "set_alpha_provider"):
         runner.set_alpha_provider(learner)
 
+    final_model_dir = os.path.join(model_dir, 'final')
 
-    if os.path.exists(model_dir):
+    if os.path.exists(final_model_dir):
         try:
-            learner.load_models(model_dir)
-            logger.info(f"✓ model loaded: {model_dir}")
+            learner.load_models(final_model_dir)
+            logger.info(f"✓ model loaded: {final_model_dir}")
         except:
             logger.warning(f"⚠ random")
 
@@ -311,8 +312,8 @@ def main():
     parser.add_argument('--test-eps', type=int, default=30, help='test episode')
     parser.add_argument('--config', default=os.path.join(_PROJECT_ROOT, 'scripts', 'config_p0.yaml'),
                       )
-    parser.add_argument('--log-dir', default='logs_p0_test')
-    parser.add_argument('--model-dir', default='models_p0_test')
+    parser.add_argument('--log-dir', default='logs_gsm8k')
+    parser.add_argument('--model-dir', default='models_gsm8k')
     args = parser.parse_args()
 
 

@@ -159,9 +159,9 @@ logging:
   log_interval: 1
   save_model: true
   save_model_interval: 50
-  checkpoint_path: "./models_p0_optimized"    
-  log_path: "./logs_p0_optimized"              
-  experiment_name: "bne_p0_optimized_300ep"
+  checkpoint_path: "./models_gsm8k"    
+  log_path: "./logs_gsm8k"              
+  experiment_name: "bne_gsm8k_300ep"
 
 
 llm:
