@@ -653,6 +653,21 @@ class ECONLearner:
 
     # ---------------- IO ----------------
 
+    def _prepare_mixer_for_checkpoint(self, mixer: LLMQMixer, state_dict: Dict[str, torch.Tensor]) -> None:
+        commit_weight = state_dict.get("proj_commit.weight")
+        if commit_weight is None:
+            return
+
+        out_features, in_features = commit_weight.shape
+        current = getattr(mixer, "proj_commit", None)
+        needs_create = (
+            current is None
+            or current.in_features != in_features
+            or current.out_features != out_features
+        )
+        if needs_create:
+            mixer.proj_commit = nn.Linear(in_features, out_features).to(self.device)
+
     def save_models(self, path: str):
         os.makedirs(path, exist_ok=True)
 
@@ -687,7 +702,9 @@ class ECONLearner:
                 )
             self.mac.refine_module.load_state_dict(torch.load(os.path.join(path, "refine_module.th"), map_location=self.device))
             self.mac.belief_encoder.load_state_dict(torch.load(os.path.join(path, "belief_encoder.th"), map_location=self.device))
-            self.mixer.load_state_dict(torch.load(os.path.join(path, "mixer.th"), map_location=self.device))
+            mixer_state = torch.load(os.path.join(path, "mixer.th"), map_location=self.device)
+            self._prepare_mixer_for_checkpoint(self.mixer, mixer_state)
+            self.mixer.load_state_dict(mixer_state)
             # Sync targets to loaded weights
             if hasattr(self, "target_policy_networks"):
                 for tgt, src in zip(self.target_policy_networks, self.mac.policy_networks):
@@ -695,6 +712,7 @@ class ECONLearner:
             if hasattr(self, "target_belief_encoder"):
                 self.target_belief_encoder.load_state_dict(self.mac.belief_encoder.state_dict())
             if hasattr(self, "target_mixer"):
+                self._prepare_mixer_for_checkpoint(self.target_mixer, self.mixer.state_dict())
                 self.target_mixer.load_state_dict(self.mixer.state_dict())
             alpha_path = os.path.join(path, "alpha_weights.th")
             if os.path.exists(alpha_path):
@@ -704,8 +722,11 @@ class ECONLearner:
             # Legacy mode: load single belief network
             self.mac.agent.belief_network.load_state_dict(torch.load(os.path.join(path, "belief_network.th"), map_location=self.device))
             self.mac.belief_encoder.load_state_dict(torch.load(os.path.join(path, "belief_encoder.th"), map_location=self.device))
-            self.mixer.load_state_dict(torch.load(os.path.join(path, "mixer.th"), map_location=self.device))
+            mixer_state = torch.load(os.path.join(path, "mixer.th"), map_location=self.device)
+            self._prepare_mixer_for_checkpoint(self.mixer, mixer_state)
+            self.mixer.load_state_dict(mixer_state)
             if hasattr(self, "target_mixer"):
+                self._prepare_mixer_for_checkpoint(self.target_mixer, self.mixer.state_dict())
                 self.target_mixer.load_state_dict(self.mixer.state_dict())
             alpha_path = os.path.join(path, "alpha_weights.th")
             if os.path.exists(alpha_path):

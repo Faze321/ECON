@@ -1,4 +1,4 @@
-
+﻿
 import os
 import sys
 import json
@@ -216,8 +216,9 @@ def run_testing(config_file, episodes, bne_rounds, log_dir, model_dir, tag, logg
         try:
             learner.load_models(final_model_dir)
             logger.info(f"✓ model loaded: {final_model_dir}")
-        except:
-            logger.warning(f"⚠ random")
+        except Exception as e:
+            logger.warning(f"⚠ random failure loading model: {e}")
+            raise RuntimeError(f"Failed to load model from {final_model_dir}: {e}")
 
  
     traces = []
