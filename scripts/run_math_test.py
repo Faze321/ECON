@@ -20,6 +20,8 @@ def main():
         sys.argv.extend(["--log-dir", os.path.join(PROJECT_ROOT, "logs_math")])
     if "--model-dir" not in sys.argv:
         sys.argv.extend(["--model-dir", os.path.join(PROJECT_ROOT, "models_math")])
+    if "--bne-rounds" not in sys.argv:
+        sys.argv.extend(["--bne-rounds", "3"])
     base_main()
 
 

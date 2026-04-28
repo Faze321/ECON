@@ -14,7 +14,7 @@ sys.path.append(os.path.join(_PROJECT_ROOT, "src"))
 
 
 
-def run_training(config_file, episodes, log_dir, model_dir, logger):
+def run_training(config_file, episodes, bne_rounds, log_dir, model_dir, logger):
 
     import yaml
     with open(config_file, 'r') as f:
@@ -32,6 +32,13 @@ def run_training(config_file, episodes, log_dir, model_dir, logger):
         config['logging'] = {}
     config['logging']['checkpoint_path'] = model_dir
     config['logging']['log_path'] = log_dir
+    enabled = bne_rounds > 0
+    config["bne"]["enabled"] = enabled
+    config["bne"]["train_refine"] = enabled
+    config["bne"]["refine_at_infer"] = enabled
+    if not enabled:
+        config["bne"]["max_iterations_train"] = 0
+        config["bne"]["max_iterations_infer"] = 0
 
     temp_config = config_file.replace('.yaml', '_temp.yaml')
     with open(temp_config, 'w') as f:
@@ -311,6 +318,7 @@ def main():
     parser.add_argument('--train-eps', type=int, default=100, )
                   
     parser.add_argument('--test-eps', type=int, default=30, help='test episode')
+    parser.add_argument('--bne-rounds', type=int, default=3, help='number of BNE rounds (0 for no BNE)')
     parser.add_argument('--config', default=os.path.join(_PROJECT_ROOT, 'scripts', 'config_p0.yaml'),
                       )
     parser.add_argument('--log-dir', default='logs_gsm8k')
@@ -329,12 +337,12 @@ def main():
     from utils.logging import get_logger
     logger = get_logger(args.log_dir)
 
-    run_training(args.config, args.train_eps, args.log_dir, args.model_dir, logger)
+    run_training(args.config, args.train_eps, args.bne_rounds, args.log_dir, args.model_dir, logger)
 
     print("="*60 + "\n")
 
     # Run testing with BNE
-    run_testing(args.config, args.test_eps, 3, args.log_dir, args.model_dir, "bne_3rounds", logger)
+    run_testing(args.config, args.test_eps, args.bne_rounds, args.log_dir, args.model_dir, f"bne_{args.bne_rounds}rounds", logger)
 
 
 if __name__ == '__main__':

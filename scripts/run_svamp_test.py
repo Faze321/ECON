@@ -20,6 +20,8 @@ def main():
         sys.argv.extend(["--log-dir", os.path.join(PROJECT_ROOT, "logs_svamp")])
     if "--model-dir" not in sys.argv:
         sys.argv.extend(["--model-dir", os.path.join(PROJECT_ROOT, "models_svamp")])
+    if "--bne-rounds" not in sys.argv:
+        sys.argv.extend(["--bne-rounds", "3"])
     base_main()
 
 
