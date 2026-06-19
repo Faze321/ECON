@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -15,13 +16,18 @@ sys.path.append(_PROJECT_ROOT)
 sys.path.append(os.path.join(_PROJECT_ROOT, "src"))
 
 
-def _write_temp_config(config_path: str, log_dir: str, episodes: int) -> str:
+def _write_temp_config(config_path: str, log_dir: str, episodes: int, baseline_rounds: Optional[int] = None) -> str:
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     config["test_nepisode"] = episodes
     config.setdefault("logging", {})
     config["logging"]["log_path"] = log_dir
+    if baseline_rounds is not None:
+        rounds = max(1, int(baseline_rounds))
+        config["baseline_rounds"] = rounds
+        config.setdefault("llm", {})
+        config["llm"]["baseline_rounds"] = rounds
 
     test_env_overrides = config.get("env_args_test")
     if isinstance(test_env_overrides, dict):
@@ -110,14 +116,14 @@ def _summarize_traces(traces, record_type: str):
     return records
 
 
-def run_baseline(config_path: str, episodes: int, log_dir: str):
+def run_baseline(config_path: str, episodes: int, log_dir: str, baseline_rounds: Optional[int] = None):
     from train import load_config, setup_experiment
     from utils.logging import get_logger
 
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     logger = get_logger(log_dir, experiment_name="baseline_no_bne", use_tensorboard=False)
 
-    temp_config = _write_temp_config(config_path, log_dir, episodes)
+    temp_config = _write_temp_config(config_path, log_dir, episodes, baseline_rounds)
     try:
         config = load_config(temp_config)
         runner, mac, learner, logger, device = setup_experiment(config, logger)
@@ -152,9 +158,15 @@ def main():
     parser.add_argument("--config", default=os.path.join(_SCRIPT_DIR, "baseline_no_bne.yaml"))
     parser.add_argument("--test-eps", type=int, default=30, help="test episode")
     parser.add_argument("--log-dir", default="logs_baseline_gsm8k")
+    parser.add_argument(
+        "--baseline-rounds",
+        type=int,
+        default=None,
+        help="number of no-BNE executor/coordinator discussion rounds; defaults to config value",
+    )
     args = parser.parse_args()
 
-    run_baseline(args.config, args.test_eps, args.log_dir)
+    run_baseline(args.config, args.test_eps, args.log_dir, args.baseline_rounds)
 
 
 if __name__ == "__main__":

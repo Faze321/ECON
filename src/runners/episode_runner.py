@@ -430,6 +430,12 @@ class EpisodeRunner:
         if isinstance(mac_info, dict) and "commitment_metadata" in mac_info:
             self._last_trace["commitment_metadata"] = mac_info["commitment_metadata"]
 
+        if isinstance(mac_info, dict) and "baseline_discussion_history" in mac_info:
+            self._last_trace["baseline_discussion"] = {
+                "n_rounds": int(mac_info.get("baseline_rounds", 1)),
+                "rounds": mac_info.get("baseline_discussion_history", []),
+            }
+
         if bne_data is not None:
             e_init_np = bne_data["e_init"].detach().cpu().numpy()
             e_refined_np = bne_data["e_refined"].detach().cpu().numpy()

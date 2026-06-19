@@ -20,6 +20,8 @@ class BaselineMAC:
     refinement networks, mixer optimization, learned belief updates, and action
     optimization. Each episode is plain LLM orchestration:
       coordinator strategy -> N executor answers -> coordinator commitment.
+    When baseline_rounds > 1, later rounds feed the previous executor answers
+    and coordinator commitment back to the executors for another plain LLM pass.
     """
 
     def __init__(self, scheme: Dict, groups: Dict, args: Any, logger):
@@ -151,19 +153,9 @@ class BaselineMAC:
         if not strategy or not strategy.strip():
             strategy = "Solve the problem step by step and give the final answer in \\boxed{}."
 
-        executor_outputs = []
-        for idx, agent in enumerate(self.agents):
-            prompt = self._build_agent_prompt(question, strategy, idx)
-            text = agent.generate_response(
-                prompt=prompt,
-                temperature=float(self._get_opt("executor_temperature", 0.2)),
-                top_p=float(self._get_opt("executor_top_p", 0.9)),
-                repetition_penalty=float(self._get_opt("executor_repetition_penalty", 1.05)),
-                max_tokens=int(self._get_opt("executor_max_tokens", 1024)),
-            )
-            executor_outputs.append(self._ensure_boxed_format(self._post_sanitize_text(text)))
-
-        commitment = self._generate_commitment(question, strategy, executor_outputs)
+        discussion = self.run_multi_round_discussion(question, strategy, self._get_discussion_rounds())
+        executor_outputs = discussion["outputs_final"]
+        commitment = discussion["commitment_final"]
         chosen_actions = torch.zeros((1, self.n_agents), dtype=torch.long, device=self.device)
 
         return chosen_actions, {
@@ -175,7 +167,75 @@ class BaselineMAC:
             "format": "",
             "selected_actions": chosen_actions.detach().clone(),
             "commitment_metadata": self._last_commitment_metadata,
+            "baseline_rounds": discussion["n_rounds"],
+            "baseline_discussion_history": discussion["history"],
         }
+
+    def _get_discussion_rounds(self) -> int:
+        configured = self._get_opt("baseline_rounds", None)
+        if configured is None:
+            configured = self._get_opt("discussion_rounds", 1)
+        try:
+            return max(1, int(configured))
+        except (TypeError, ValueError):
+            self.logger.warning(f"[BaselineMAC] Invalid baseline_rounds={configured!r}; using 1")
+            return 1
+
+    def run_multi_round_discussion(
+        self,
+        question: str,
+        strategy: str,
+        n_rounds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Run plain no-BNE executor/coordinator discussion for one or more rounds."""
+        rounds = max(1, int(n_rounds if n_rounds is not None else self._get_discussion_rounds()))
+        history: List[Dict[str, Any]] = []
+        feedback = ""
+        executor_outputs: List[str] = []
+        commitment = ""
+
+        for round_idx in range(rounds):
+            executor_outputs = []
+            for agent_idx, agent in enumerate(self.agents):
+                if round_idx == 0:
+                    prompt = self._build_agent_prompt(question, strategy, agent_idx)
+                else:
+                    prompt = self._build_agent_revision_prompt(
+                        question=question,
+                        strategy=strategy,
+                        agent_idx=agent_idx,
+                        previous_rounds=history,
+                        coordinator_feedback=feedback,
+                    )
+                executor_outputs.append(self._generate_executor_response(agent, prompt))
+
+            commitment = self._generate_commitment(question, strategy, executor_outputs)
+            metadata = dict(self._last_commitment_metadata or {})
+            round_record = {
+                "round": round_idx + 1,
+                "executor_outputs": executor_outputs,
+                "commitment": commitment,
+                "commitment_metadata": metadata,
+            }
+            history.append(round_record)
+            feedback = self._build_coordinator_feedback(commitment, metadata)
+
+        return {
+            "outputs_final": executor_outputs,
+            "commitment_final": commitment,
+            "history": history,
+            "n_rounds": len(history),
+        }
+
+    def _generate_executor_response(self, agent: ImprovedLLMWrapper, prompt: str) -> str:
+        text = agent.generate_response(
+            prompt=prompt,
+            temperature=float(self._get_opt("executor_temperature", 0.2)),
+            top_p=float(self._get_opt("executor_top_p", 0.9)),
+            repetition_penalty=float(self._get_opt("executor_repetition_penalty", 1.05)),
+            max_tokens=int(self._get_opt("executor_max_tokens", 1024)),
+        )
+        return self._ensure_boxed_format(self._post_sanitize_text(text))
 
     def _get_strategy_and_format(self, question: str) -> str:
         prompt = f"""You are the Coordinator. Provide a clear, step-by-step STRATEGY for solving this math problem.
@@ -223,6 +283,76 @@ Your Task:
 
 Begin your detailed solution now.
 """
+
+    def _build_agent_revision_prompt(
+        self,
+        question: str,
+        strategy: str,
+        agent_idx: int,
+        previous_rounds: List[Dict[str, Any]],
+        coordinator_feedback: str,
+    ) -> str:
+        history = self._format_discussion_history(previous_rounds)
+        return f"""You are Executor {agent_idx + 1} in a no-BNE multi-round discussion. Revise your solution using the shared history and the Coordinator's latest review.
+
+Problem:
+{question}
+
+High-Level Strategy:
+{strategy}
+
+Previous Discussion:
+{history}
+
+Coordinator Review:
+{coordinator_feedback}
+
+Your Task:
+1. Re-check the problem from scratch, not just your previous answer.
+2. Compare your reasoning against the other executors and the Coordinator review.
+3. Correct any arithmetic, interpretation, or formatting mistakes.
+4. The final line MUST be the answer enclosed in `\\boxed{{...}}`. Do not add any text after it.
+
+Begin your revised solution now.
+"""
+
+    def _format_discussion_history(self, previous_rounds: List[Dict[str, Any]]) -> str:
+        if not previous_rounds:
+            return "No previous rounds."
+
+        blocks = []
+        max_chars = int(self._get_opt("baseline_history_max_chars", 6000))
+        per_output_chars = max(400, max_chars // max(1, len(previous_rounds) * max(1, self.n_agents)))
+
+        for record in previous_rounds:
+            lines = [
+                f"Round {record.get('round', '?')} Coordinator commitment: {record.get('commitment', '')}"
+            ]
+            for idx, output in enumerate(record.get("executor_outputs", [])):
+                lines.append(f"Executor {idx + 1}: {self._truncate_text(str(output), per_output_chars)}")
+            blocks.append("\n".join(lines))
+
+        return self._truncate_text("\n\n".join(blocks), max_chars)
+
+    def _build_coordinator_feedback(self, commitment: str, metadata: Dict[str, Any]) -> str:
+        lines = [f"Current commitment: {commitment}"]
+        reasoning = metadata.get("reasoning")
+        if reasoning:
+            lines.append(f"Coordinator reasoning: {reasoning}")
+        confidence = metadata.get("confidence")
+        if confidence is not None:
+            lines.append(f"Coordinator confidence: {confidence}")
+        checklist = metadata.get("checklist")
+        if isinstance(checklist, dict) and checklist:
+            checklist_text = ", ".join(f"{key}={value}" for key, value in checklist.items())
+            lines.append(f"Coordinator checklist: {checklist_text}")
+        lines.append("Use this review to verify or revise the next answer.")
+        return "\n".join(lines)
+
+    def _truncate_text(self, text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 20)].rstrip() + "\n...[truncated]"
 
     def _generate_commitment(self, question: str, strategy: str, responses: List[str]) -> str:
         formatted = "\n".join([f"Executor {idx + 1}: {text}" for idx, text in enumerate(responses)])

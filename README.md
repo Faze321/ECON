@@ -249,6 +249,14 @@ python scripts/run_svamp_test.py \
 
 Already-trained checkpoints can be evaluated directly with `scripts/test_math.py` and `scripts/test_svamp.py` (baseline vs BNE, 10 episodes each by default).
 
+No-BNE baseline evaluation can also run multiple plain discussion rounds without BNE networks:
+
+```bash
+python scripts/run_baseline_no_bne.py --baseline-rounds 3
+```
+
+For the baseline controller, `baseline_rounds` is the total number of executor/coordinator discussion rounds. Each round runs all executors once, then the coordinator aggregates once. Later rounds feed the previous executor outputs and coordinator commitment back into the next executor prompts.
+
 ### Episode Structure Explanation
 
 **Important:** Episodes in ECON have a unique structure that differs from traditional RL environments.
