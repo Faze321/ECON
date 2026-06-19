@@ -6,7 +6,11 @@ t_max: 300
 test_interval: 100
 test_nepisode: 100
 
-n_agents: 3
+n_agents: 6
+hierarchy:
+  enabled: true
+  n_sub_coordinators: 2
+  executors_per_sub: 3
 belief_dim: 128
 n_actions: 2
 max_seq_length: 1024

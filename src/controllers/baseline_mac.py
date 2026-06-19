@@ -32,6 +32,12 @@ class BaselineMAC:
         self.n_agents = int(getattr(args, "n_agents", 3))
         self.n_actions = int(getattr(args, "n_actions", 2))
         self._last_commitment_metadata = None
+        self.hierarchy_enabled = False
+        self.n_sub_coordinators = 1
+        self.executors_per_sub = self.n_agents
+        self._init_hierarchy_config()
+        self.executor_groups = self._build_executor_groups()
+        self._last_hierarchy_trace: List[Dict[str, Any]] = []
 
         use_cuda = getattr(args.system, "use_cuda", False) and torch.cuda.is_available()
         device_num = getattr(args.system, "device_num", 0)
@@ -74,6 +80,24 @@ class BaselineMAC:
             )
             for _ in range(self.n_agents)
         ]
+        self.sub_coordinators: List[ImprovedLLMWrapper] = []
+        if self.hierarchy_enabled:
+            sub_model = self._get_opt("sub_coordinator_model", coordinator_model)
+            self.sub_coordinators = [
+                ImprovedLLMWrapper(
+                    api_key=api_key,
+                    model_name=sub_model,
+                    base_url=base_url,
+                    timeout_s=timeout_s,
+                    max_retries=max_retries,
+                    debug=debug,
+                )
+                for _ in range(len(self.executor_groups))
+            ]
+            self.logger.info(
+                f"[BaselineMAC] Hierarchy enabled: 1 global coordinator, "
+                f"{len(self.executor_groups)} sub-coordinators, groups={self.executor_groups}"
+            )
 
     def _get_opt(self, key: str, default=None):
         if hasattr(self.args, key) and getattr(self.args, key) is not None:
@@ -83,7 +107,7 @@ class BaselineMAC:
         return default
 
     def reset_token_usage(self):
-        for wrapper in [self.coordinator] + list(self.agents):
+        for wrapper in [self.coordinator] + list(self.agents) + list(getattr(self, "sub_coordinators", [])):
             if hasattr(wrapper, "reset_usage"):
                 wrapper.reset_usage()
 
@@ -103,6 +127,16 @@ class BaselineMAC:
         coordinator["total_tokens"] = int(coord_usage.get("total_tokens", 0))
         coordinator["requests"] = int(coord_usage.get("requests", 0))
 
+        sub_coordinators = self._empty_role_usage()
+        for wrapper in getattr(self, "sub_coordinators", []):
+            sub_usage = wrapper.get_usage_summary() if hasattr(wrapper, "get_usage_summary") else {}
+            sub_coordinators["prompt_tokens"] += int(sub_usage.get("prompt_tokens", 0))
+            sub_coordinators["completion_tokens"] += int(sub_usage.get("completion_tokens", 0))
+            sub_coordinators["total_tokens"] += int(sub_usage.get("total_tokens", 0))
+            sub_coordinators["requests"] += int(sub_usage.get("requests", 0))
+        for key in coordinator:
+            coordinator[key] += sub_coordinators[key]
+
         total = {
             "requests": agents["requests"] + coordinator["requests"],
             "prompt_tokens": agents["prompt_tokens"] + coordinator["prompt_tokens"],
@@ -112,6 +146,7 @@ class BaselineMAC:
         return {
             "agents": agents,
             "coordinator": coordinator,
+            "sub_coordinators": sub_coordinators,
             "total": total,
         }
 
@@ -122,6 +157,39 @@ class BaselineMAC:
             "total_tokens": 0,
             "requests": 0,
         }
+
+    def _init_hierarchy_config(self):
+        cfg = getattr(self.args, "hierarchy", object())
+        self.hierarchy_enabled = bool(getattr(cfg, "enabled", False))
+        self.n_sub_coordinators = max(1, int(getattr(cfg, "n_sub_coordinators", 1)))
+        default_per_sub = max(1, (int(self.n_agents) + self.n_sub_coordinators - 1) // self.n_sub_coordinators)
+        self.executors_per_sub = max(1, int(getattr(cfg, "executors_per_sub", default_per_sub)))
+        expected_agents = self.n_sub_coordinators * self.executors_per_sub
+        if self.hierarchy_enabled and expected_agents != int(self.n_agents):
+            self.logger.warning(
+                f"[BaselineMAC] hierarchy expects {expected_agents} executors "
+                f"({self.n_sub_coordinators}x{self.executors_per_sub}) but n_agents={self.n_agents}; "
+                "using n_agents to build the final groups"
+            )
+
+    def _build_executor_groups(self) -> List[List[int]]:
+        if not self.hierarchy_enabled:
+            return [list(range(int(self.n_agents)))]
+
+        groups: List[List[int]] = []
+        cursor = 0
+        for _ in range(self.n_sub_coordinators):
+            group = list(range(cursor, min(cursor + self.executors_per_sub, int(self.n_agents))))
+            if group:
+                groups.append(group)
+            cursor += self.executors_per_sub
+
+        if cursor < int(self.n_agents):
+            if groups:
+                groups[-1].extend(range(cursor, int(self.n_agents)))
+            else:
+                groups.append(list(range(cursor, int(self.n_agents))))
+        return groups
 
     def preprocess_observation(self, observation_text: str, max_length: Optional[int] = None) -> torch.Tensor:
         if max_length is None:
@@ -136,6 +204,54 @@ class BaselineMAC:
             return_attention_mask=False,
         )
         return enc.input_ids.squeeze(0).to(self.device)
+
+    def _get_group_index_for_agent(self, agent_idx: int) -> int:
+        for group_idx, group in enumerate(getattr(self, "executor_groups", [])):
+            if agent_idx in group:
+                return group_idx
+        return 0
+
+    def _get_sub_strategies(self, question: str, global_strategy: str) -> Dict[int, str]:
+        if not self.hierarchy_enabled:
+            return {}
+
+        sub_strategies: Dict[int, str] = {}
+        for group_idx, group in enumerate(self.executor_groups):
+            wrapper = self.sub_coordinators[group_idx] if group_idx < len(self.sub_coordinators) else self.coordinator
+            executor_labels = ", ".join(f"Executor {idx + 1}" for idx in group)
+            prompt = f"""You are Sub-Coordinator {group_idx + 1}. The Global Coordinator has assigned you to manage {executor_labels}.
+
+Problem:
+{question}
+
+Global Strategy:
+{global_strategy}
+
+Create a concise sub-strategy for your executor group. Focus on how your group should independently solve and verify the problem. Do not compute the final answer unless it is needed to specify checks.
+
+Output only the sub-strategy, under 120 tokens.
+"""
+            out = wrapper.generate_response(
+                prompt=prompt,
+                temperature=float(self._get_opt("sub_strategy_temperature", 0.25)),
+                top_p=float(self._get_opt("sub_strategy_top_p", 0.5)),
+                repetition_penalty=float(self._get_opt("sub_strategy_repetition_penalty", 1.05)),
+                max_tokens=int(self._get_opt("sub_strategy_max_tokens", 180)),
+            )
+            sub_strategies[group_idx] = self._post_sanitize_text(out) or global_strategy
+        return sub_strategies
+
+    def _compose_executor_strategy(self, global_strategy: str, sub_strategies: Dict[int, str], agent_idx: int) -> str:
+        if not self.hierarchy_enabled:
+            return global_strategy
+        group_idx = self._get_group_index_for_agent(agent_idx)
+        sub_strategy = sub_strategies.get(group_idx, "")
+        return f"""Global Coordinator Strategy:
+{global_strategy}
+
+Sub-Coordinator {group_idx + 1} Strategy:
+{sub_strategy}
+"""
 
     def select_actions(
         self,
@@ -169,6 +285,10 @@ class BaselineMAC:
             "commitment_metadata": self._last_commitment_metadata,
             "baseline_rounds": discussion["n_rounds"],
             "baseline_discussion_history": discussion["history"],
+            "hierarchy": {
+                "executor_groups": [[idx + 1 for idx in group] for group in self.executor_groups],
+                "sub_commitments": getattr(self, "_last_hierarchy_trace", []),
+            } if self.hierarchy_enabled else None,
         }
 
     def _get_discussion_rounds(self) -> int:
@@ -193,16 +313,18 @@ class BaselineMAC:
         feedback = ""
         executor_outputs: List[str] = []
         commitment = ""
+        sub_strategies = self._get_sub_strategies(question, strategy)
 
         for round_idx in range(rounds):
             executor_outputs = []
             for agent_idx, agent in enumerate(self.agents):
+                executor_strategy = self._compose_executor_strategy(strategy, sub_strategies, agent_idx)
                 if round_idx == 0:
-                    prompt = self._build_agent_prompt(question, strategy, agent_idx)
+                    prompt = self._build_agent_prompt(question, executor_strategy, agent_idx)
                 else:
                     prompt = self._build_agent_revision_prompt(
                         question=question,
-                        strategy=strategy,
+                        strategy=executor_strategy,
                         agent_idx=agent_idx,
                         previous_rounds=history,
                         coordinator_feedback=feedback,
@@ -355,6 +477,10 @@ Begin your revised solution now.
         return text[: max(0, max_chars - 20)].rstrip() + "\n...[truncated]"
 
     def _generate_commitment(self, question: str, strategy: str, responses: List[str]) -> str:
+        if self.hierarchy_enabled and responses:
+            return self._generate_hierarchical_commitment(question, strategy, responses)
+        self._last_hierarchy_trace = []
+
         formatted = "\n".join([f"Executor {idx + 1}: {text}" for idx, text in enumerate(responses)])
         prompt = f"""You are the COORDINATOR. Review the question, strategy and all executor solutions to aggregate and produce a structured final answer.
 
@@ -403,6 +529,120 @@ Critical Requirements:
             max_tokens=int(self._get_opt("commitment_max_tokens", 150)),
         )
         final_answer, metadata = self._parse_structured_commitment(self._post_sanitize_text(out))
+        self._last_commitment_metadata = metadata
+        return f"\\boxed{{{final_answer}}}"
+
+    def _generate_hierarchical_commitment(self, question: str, strategy: str, responses: List[str]) -> str:
+        sub_records = []
+        for group_idx, group in enumerate(self.executor_groups):
+            wrapper = self.sub_coordinators[group_idx] if group_idx < len(self.sub_coordinators) else self.coordinator
+            group_responses = [(idx, responses[idx]) for idx in group if idx < len(responses)]
+            formatted = "\n".join([f"Executor {idx + 1}: {text}" for idx, text in group_responses])
+            prompt = f"""You are Sub-Coordinator {group_idx + 1}. Review only your assigned executor solutions and produce a structured group-level answer.
+
+Problem:
+{question}
+
+Global Strategy:
+{strategy}
+
+Assigned Executor Solutions:
+{formatted}
+
+Output Format (JSON only, no markdown):
+{{
+  "final_value": "<group answer expression or undetermined>",
+  "reasoning": "<1-sentence explanation>",
+  "confidence": <0.0-1.0>,
+  "checklist": {{
+    "all_agree": <true/false>,
+    "arithmetic_verified": <true/false>,
+    "units_correct": <true/false>
+  }}
+}}
+"""
+            out = wrapper.generate_response(
+                prompt=prompt,
+                temperature=float(self._get_opt("sub_commitment_temperature", 0.1)),
+                top_p=float(self._get_opt("sub_commitment_top_p", 0.3)),
+                repetition_penalty=float(self._get_opt("sub_commitment_repetition_penalty", 1.05)),
+                max_tokens=int(self._get_opt("sub_commitment_max_tokens", 180)),
+            )
+            final_answer, metadata = self._parse_structured_commitment(self._post_sanitize_text(out))
+            sub_records.append({
+                "sub_coordinator": group_idx + 1,
+                "executors": [idx + 1 for idx, _ in group_responses],
+                "executor_outputs": [text for _, text in group_responses],
+                "commitment": f"\\boxed{{{final_answer}}}",
+                "metadata": metadata,
+            })
+
+        formatted_sub = "\n\n".join(
+            [
+                "Sub-Coordinator {sub_coordinator} "
+                "(Executors {executors}) commitment: {commitment}\n"
+                "Reasoning: {reasoning}\n"
+                "Confidence: {confidence}".format(
+                    sub_coordinator=record["sub_coordinator"],
+                    executors=", ".join(str(x) for x in record["executors"]),
+                    commitment=record["commitment"],
+                    reasoning=record["metadata"].get("reasoning", ""),
+                    confidence=record["metadata"].get("confidence", 0.0),
+                )
+                for record in sub_records
+            ]
+        )
+
+        global_prompt = f"""You are the GLOBAL COORDINATOR. Aggregate the sub-coordinator group answers into one final answer.
+
+Problem:
+{question}
+
+Global Strategy:
+{strategy}
+
+Sub-Coordinator Reports:
+{formatted_sub}
+
+Your Task:
+1. Compare the sub-coordinator commitments.
+2. If they agree, use the agreed answer.
+3. If they disagree, inspect the reported reasoning and choose the mathematically correct answer.
+4. If information is insufficient, return "undetermined" with low confidence.
+
+Output Format (JSON only, no markdown):
+{{
+  "final_value": "<answer expression or undetermined>",
+  "reasoning": "<1-sentence explanation>",
+  "confidence": <0.0-1.0>,
+  "checklist": {{
+    "sub_coordinators_agree": <true/false>,
+    "arithmetic_verified": <true/false>,
+    "units_correct": <true/false>
+  }}
+}}
+"""
+        out = self.coordinator.generate_response(
+            prompt=global_prompt,
+            temperature=float(self._get_opt("commitment_temperature", 0.1)),
+            top_p=float(self._get_opt("commitment_top_p", 0.3)),
+            repetition_penalty=float(self._get_opt("commitment_repetition_penalty", 1.05)),
+            max_tokens=int(self._get_opt("commitment_max_tokens", 150)),
+        )
+        final_answer, metadata = self._parse_structured_commitment(self._post_sanitize_text(out))
+        metadata["hierarchy"] = {
+            "n_sub_coordinators": len(sub_records),
+            "sub_commitments": [
+                {
+                    "sub_coordinator": record["sub_coordinator"],
+                    "executors": record["executors"],
+                    "commitment": record["commitment"],
+                    "metadata": record["metadata"],
+                }
+                for record in sub_records
+            ],
+        }
+        self._last_hierarchy_trace = sub_records
         self._last_commitment_metadata = metadata
         return f"\\boxed{{{final_answer}}}"
 

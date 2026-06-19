@@ -13,7 +13,11 @@ rb_seq_len: 1
 rb_batch_episodes: 8      
 rb_updates_per_step: 4    
 text_embed_dim: 1024
-n_agents: 3
+n_agents: 6
+hierarchy:
+  enabled: true
+  n_sub_coordinators: 2
+  executors_per_sub: 3
 belief_dim: 128
 batch_size_run: 1
 state_shape: 1024

@@ -38,6 +38,12 @@ class LLMBasicMAC:
         use_cuda = getattr(args.system, "use_cuda", False) and torch.cuda.is_available()
         self.device = torch.device("cuda" if use_cuda else "cpu")
         self.logger = logger
+        self.hierarchy_enabled = False
+        self.n_sub_coordinators = 1
+        self.executors_per_sub = self.n_agents
+        self._init_hierarchy_config()
+        self.executor_groups = self._build_executor_groups()
+        self._last_hierarchy_trace: List[Dict[str, Any]] = []
 
         model_name = getattr(args, "llm_model_name", "gpt2")
         try:
@@ -119,6 +125,26 @@ class LLMBasicMAC:
             belief_dim=args.belief_dim,
             debug=getattr(args, "debug", False)
         )
+        self.sub_coordinators: List[ImprovedLLMWrapper] = []
+        if self.hierarchy_enabled:
+            sub_model = self._get_opt("sub_coordinator_model", self._get_opt("coordinator_model", args.coordinator_model))
+            base_url = self._get_opt("base_url", "https://openrouter.ai/api/v1")
+            api_key = self._get_opt("llm_api_key", getattr(args, "llm_api_key", ""))
+            debug = bool(self._get_opt("debug", getattr(args, "debug", False)))
+            self.sub_coordinators = [
+                ImprovedLLMWrapper(
+                    api_key=api_key,
+                    model_name=sub_model,
+                    belief_dim=args.belief_dim,
+                    base_url=base_url,
+                    debug=debug,
+                )
+                for _ in range(len(self.executor_groups))
+            ]
+            self.logger.info(
+                f"[MAC] Hierarchy enabled: 1 global coordinator, "
+                f"{len(self.executor_groups)} sub-coordinators, groups={self.executor_groups}"
+            )
 
         self.belief_encoder = BeliefEncoder(
             belief_dim=args.belief_dim,
@@ -154,8 +180,21 @@ class LLMBasicMAC:
             else:
                 usage[name] = self._empty_token_usage()
 
+        if getattr(self, "sub_coordinators", None):
+            sub_total = self._empty_token_usage()
+            for wrapper in self.sub_coordinators:
+                sub_usage = wrapper.get_usage_summary() if hasattr(wrapper, "get_usage_summary") else {}
+                for key in sub_total:
+                    sub_total[key] += int(sub_usage.get(key, 0))
+            usage["sub_coordinators"] = sub_total
+            usage.setdefault("coordinator", self._empty_token_usage())
+            for key in sub_total:
+                usage["coordinator"][key] += sub_total[key]
+
         total = self._empty_token_usage()
-        for item in usage.values():
+        for name, item in usage.items():
+            if name == "sub_coordinators":
+                continue
             for key in total:
                 total[key] += int(item.get(key, 0))
         usage["total"] = total
@@ -176,6 +215,46 @@ class LLMBasicMAC:
             "completion_tokens": 0,
             "total_tokens": 0,
         }
+
+    def _get_opt(self, key: str, default=None):
+        if hasattr(self.args, key) and getattr(self.args, key) is not None:
+            return getattr(self.args, key)
+        if hasattr(self.args, "llm") and hasattr(self.args.llm, key) and getattr(self.args.llm, key) is not None:
+            return getattr(self.args.llm, key)
+        return default
+
+    def _init_hierarchy_config(self):
+        cfg = getattr(self.args, "hierarchy", object())
+        self.hierarchy_enabled = bool(getattr(cfg, "enabled", False))
+        self.n_sub_coordinators = max(1, int(getattr(cfg, "n_sub_coordinators", 1)))
+        default_per_sub = max(1, (int(self.n_agents) + self.n_sub_coordinators - 1) // self.n_sub_coordinators)
+        self.executors_per_sub = max(1, int(getattr(cfg, "executors_per_sub", default_per_sub)))
+        expected_agents = self.n_sub_coordinators * self.executors_per_sub
+        if self.hierarchy_enabled and expected_agents != int(self.n_agents):
+            self.logger.warning(
+                f"[MAC] hierarchy expects {expected_agents} executors "
+                f"({self.n_sub_coordinators}x{self.executors_per_sub}) but n_agents={self.n_agents}; "
+                "using n_agents to build the final groups"
+            )
+
+    def _build_executor_groups(self) -> List[List[int]]:
+        if not self.hierarchy_enabled:
+            return [list(range(int(self.n_agents)))]
+
+        groups: List[List[int]] = []
+        cursor = 0
+        for _ in range(self.n_sub_coordinators):
+            group = list(range(cursor, min(cursor + self.executors_per_sub, int(self.n_agents))))
+            if group:
+                groups.append(group)
+            cursor += self.executors_per_sub
+
+        if cursor < int(self.n_agents):
+            if groups:
+                groups[-1].extend(range(cursor, int(self.n_agents)))
+            else:
+                groups.append(list(range(cursor, int(self.n_agents))))
+        return groups
 
     def _build_agents(self, max_token_len: int):
         self.agent = LLMTransformerAgent(input_shape=max_token_len, args=self.args)
@@ -200,6 +279,71 @@ class LLMBasicMAC:
             return_attention_mask=False,
         )
         return enc.input_ids.squeeze(0).to(self.device)
+
+    def _get_group_index_for_agent(self, agent_idx: int) -> int:
+        for group_idx, group in enumerate(getattr(self, "executor_groups", [])):
+            if agent_idx in group:
+                return group_idx
+        return 0
+
+    def _get_sub_strategies(self, question: str, global_strategy: str) -> Dict[int, str]:
+        if not self.hierarchy_enabled:
+            return {}
+
+        sub_strategies: Dict[int, str] = {}
+        for group_idx, group in enumerate(self.executor_groups):
+            wrapper = self.sub_coordinators[group_idx] if group_idx < len(self.sub_coordinators) else self.coordinator
+            executor_labels = ", ".join(f"Executor {idx + 1}" for idx in group)
+            prompt = f"""You are Sub-Coordinator {group_idx + 1}. The Global Coordinator has assigned you to manage {executor_labels}.
+
+Problem:
+{question}
+
+Global Strategy:
+{global_strategy}
+
+Create a concise sub-strategy for your executor group. Focus on how your group should independently solve and verify the problem. Do not compute the final answer unless it is needed to specify checks.
+
+Output only the sub-strategy, under 120 tokens.
+"""
+            out = wrapper.generate_response(
+                prompt=prompt,
+                temperature=float(self._get_opt("sub_strategy_temperature", 0.25)),
+                top_p=float(self._get_opt("sub_strategy_top_p", 0.5)),
+                repetition_penalty=float(self._get_opt("sub_strategy_repetition_penalty", 1.05)),
+                max_tokens=int(self._get_opt("sub_strategy_max_tokens", 180)),
+            )
+            sub_strategies[group_idx] = self._post_sanitize_text(out) or global_strategy
+        return sub_strategies
+
+    def _compose_executor_strategy(self, global_strategy: str, sub_strategies: Dict[int, str], agent_idx: int) -> str:
+        if not self.hierarchy_enabled:
+            return global_strategy
+        group_idx = self._get_group_index_for_agent(agent_idx)
+        sub_strategy = sub_strategies.get(group_idx, "")
+        return f"""Global Coordinator Strategy:
+{global_strategy}
+
+Sub-Coordinator {group_idx + 1} Strategy:
+{sub_strategy}
+"""
+
+    def _generate_agent_answer(
+        self,
+        question: str,
+        global_strategy: str,
+        agent_idx: int,
+        temperature: float,
+        top_p: float,
+        sub_strategies: Optional[Dict[int, str]] = None,
+    ) -> str:
+        strategy = self._compose_executor_strategy(global_strategy, sub_strategies or {}, agent_idx)
+        return self.agent.generate_answer(
+            question=question,
+            strategy=strategy,
+            temperature=temperature,
+            top_p=top_p,
+        )
 
     def _build_inputs(self, batch: Any, t: int) -> Tuple[torch.Tensor, torch.Tensor]:
         bs = batch.batch_size
@@ -422,6 +566,7 @@ class LLMBasicMAC:
                 strategy_text = "Break down the problem into steps and solve each part."
             else:
                 self.logger.debug(f"[MAC] Strategy generated: {strategy_text[:100]}...")
+            sub_strategies = self._get_sub_strategies(raw_observation_text, strategy_text)
             e_now = agent_info["prompt_embeddings"][0]  # (N,2)
             for i in range(self.n_agents):
                 try:
@@ -430,11 +575,13 @@ class LLMBasicMAC:
                     p_i = float(e_now[i, 1].item())
 
                     # Generate with explicit parameters
-                    resp = self.agent.generate_answer(
+                    resp = self._generate_agent_answer(
                         question=raw_observation_text,
-                        strategy=strategy_text,
+                        global_strategy=strategy_text,
+                        agent_idx=i,
                         temperature=T_i,
-                        top_p=p_i
+                        top_p=p_i,
+                        sub_strategies=sub_strategies,
                     )
                 except Exception as e:
                     self.logger.warning(f"Executor {i} failed: {e}")
@@ -473,6 +620,11 @@ class LLMBasicMAC:
         if raw_observation_text is not None and hasattr(self, "_last_commitment_metadata"):
             agent_info["commitment_metadata"] = self._last_commitment_metadata
 
+        if self.hierarchy_enabled:
+            agent_info["hierarchy"] = {
+                "executor_groups": [[idx + 1 for idx in group] for group in self.executor_groups],
+                "sub_commitments": getattr(self, "_last_hierarchy_trace", []),
+            }
 
         return chosen_actions, agent_info
 
@@ -578,6 +730,7 @@ class LLMBasicMAC:
         # Track embeddings for training
         output_embs_0 = None  # First iteration output embeddings
         commitment_emb_0 = None  # First iteration commitment embedding
+        sub_strategies = self._get_sub_strategies(obs_text, strategy_text)
 
 
         def generate_with_params(e_mat: torch.Tensor) -> List[str]:
@@ -592,11 +745,13 @@ class LLMBasicMAC:
                 p_i = max(p_min, min(p_max, p_i))
 
              
-                txt = self.agent.generate_answer(
+                txt = self._generate_agent_answer(
                     question=obs_text,
-                    strategy=strategy_text,
+                    global_strategy=strategy_text,
+                    agent_idx=i,
                     temperature=T_i,
-                    top_p=p_i
+                    top_p=p_i,
+                    sub_strategies=sub_strategies,
                 )
 
                 
@@ -802,16 +957,19 @@ class LLMBasicMAC:
         group_repr = self.belief_encoder(beliefs.unsqueeze(0)).squeeze(0)  # (belief_dim,)
 
         
+        sub_strategies = self._get_sub_strategies(obs_text, strategy_text)
         exec_outputs_0 = []
         for i in range(self.n_agents):
             try:
                 T_i = float(e_init[i, 0].item())
                 p_i = float(e_init[i, 1].item())
-                resp = self.agent.generate_answer(
+                resp = self._generate_agent_answer(
                     question=obs_text,
-                    strategy=strategy_text,
+                    global_strategy=strategy_text,
+                    agent_idx=i,
                     temperature=T_i,
-                    top_p=p_i
+                    top_p=p_i,
+                    sub_strategies=sub_strategies,
                 )
             except Exception as e:
                 self.logger.warning(f"[BNE] Executor {i} round 0 failed: {e}")
@@ -866,11 +1024,13 @@ class LLMBasicMAC:
             try:
                 T_i = float(e_refined[i, 0].item())
                 p_i = float(e_refined[i, 1].item())
-                resp = self.agent.generate_answer(
+                resp = self._generate_agent_answer(
                     question=obs_text,
-                    strategy=strategy_text,
+                    global_strategy=strategy_text,
+                    agent_idx=i,
                     temperature=T_i,
-                    top_p=p_i
+                    top_p=p_i,
+                    sub_strategies=sub_strategies,
                 )
             except Exception as e:
                 self.logger.warning(f"[BNE] Executor {i} round 1 failed: {e}")
@@ -951,6 +1111,7 @@ class LLMBasicMAC:
 
         beliefs = torch.stack(beliefs)  # (N, belief_dim)
         e_init = torch.stack(e_init)    # (N, 2)
+        sub_strategies = self._get_sub_strategies(obs_text, strategy_text)
 
         # Helper: generate responses with explicit temperature/top_p
         def generate_with_params(e_mat: torch.Tensor) -> List[str]:
@@ -965,11 +1126,13 @@ class LLMBasicMAC:
                 p_i = max(p_min, min(p_max, p_i))  # repetition_penalty
 
                 # Generate with explicit parameters (stateless)
-                resp = self.agent.generate_answer(
+                resp = self._generate_agent_answer(
                     question=obs_text,
-                    strategy=strategy_text,
+                    global_strategy=strategy_text,
+                    agent_idx=i,
                     temperature=T_i,
-                    top_p=p_i
+                    top_p=p_i,
+                    sub_strategies=sub_strategies,
                 )
 
                 # Sanitize
@@ -1133,6 +1296,9 @@ Keep your strategy clear and under 80 tokens.
     def _generate_commitment(self, question: str, strategy: str, responses: List[str],
                              group_repr: Optional[torch.Tensor] = None,
                              prompt_embeddings: Optional[torch.Tensor] = None) -> str:
+        if self.hierarchy_enabled and responses:
+            return self._generate_hierarchical_commitment(question, strategy, responses)
+        self._last_hierarchy_trace = []
 
         formatted = "\n".join([f"Executor {i+1}: {r}" for i, r in enumerate(responses)])
         commit_prompt = f"""You are the COORDINATOR. Review the question, strategy and all executor solutions to aggregate and produce a structured final answer.
@@ -1185,6 +1351,120 @@ Critical Requirements:
         self._last_commitment_metadata = metadata
 
       
+        return f"\\boxed{{{final_answer}}}"
+
+    def _generate_hierarchical_commitment(self, question: str, strategy: str, responses: List[str]) -> str:
+        sub_records = []
+        for group_idx, group in enumerate(self.executor_groups):
+            wrapper = self.sub_coordinators[group_idx] if group_idx < len(self.sub_coordinators) else self.coordinator
+            group_responses = [(idx, responses[idx]) for idx in group if idx < len(responses)]
+            formatted = "\n".join([f"Executor {idx + 1}: {text}" for idx, text in group_responses])
+            prompt = f"""You are Sub-Coordinator {group_idx + 1}. Review only your assigned executor solutions and produce a structured group-level answer.
+
+Problem:
+{question}
+
+Global Strategy:
+{strategy}
+
+Assigned Executor Solutions:
+{formatted}
+
+Output Format (JSON only, no markdown):
+{{
+  "final_value": "<group answer expression or undetermined>",
+  "reasoning": "<1-sentence explanation>",
+  "confidence": <0.0-1.0>,
+  "checklist": {{
+    "all_agree": <true/false>,
+    "arithmetic_verified": <true/false>,
+    "units_correct": <true/false>
+  }}
+}}
+"""
+            out = wrapper.generate_response(
+                prompt=prompt,
+                temperature=float(self._get_opt("sub_commitment_temperature", 0.1)),
+                top_p=float(self._get_opt("sub_commitment_top_p", 0.3)),
+                repetition_penalty=float(self._get_opt("sub_commitment_repetition_penalty", 1.05)),
+                max_tokens=int(self._get_opt("sub_commitment_max_tokens", 180)),
+            )
+            final_answer, metadata = self._parse_structured_commitment(self._post_sanitize_text(out))
+            sub_records.append({
+                "sub_coordinator": group_idx + 1,
+                "executors": [idx + 1 for idx, _ in group_responses],
+                "executor_outputs": [text for _, text in group_responses],
+                "commitment": f"\\boxed{{{final_answer}}}",
+                "metadata": metadata,
+            })
+
+        formatted_sub = "\n\n".join(
+            [
+                "Sub-Coordinator {sub_coordinator} "
+                "(Executors {executors}) commitment: {commitment}\n"
+                "Reasoning: {reasoning}\n"
+                "Confidence: {confidence}".format(
+                    sub_coordinator=record["sub_coordinator"],
+                    executors=", ".join(str(x) for x in record["executors"]),
+                    commitment=record["commitment"],
+                    reasoning=record["metadata"].get("reasoning", ""),
+                    confidence=record["metadata"].get("confidence", 0.0),
+                )
+                for record in sub_records
+            ]
+        )
+
+        global_prompt = f"""You are the GLOBAL COORDINATOR. Aggregate the sub-coordinator group answers into one final answer.
+
+Problem:
+{question}
+
+Global Strategy:
+{strategy}
+
+Sub-Coordinator Reports:
+{formatted_sub}
+
+Your Task:
+1. Compare the sub-coordinator commitments.
+2. If they agree, use the agreed answer.
+3. If they disagree, inspect the reported reasoning and choose the mathematically correct answer.
+4. If information is insufficient, return "undetermined" with low confidence.
+
+Output Format (JSON only, no markdown):
+{{
+  "final_value": "<answer expression or undetermined>",
+  "reasoning": "<1-sentence explanation>",
+  "confidence": <0.0-1.0>,
+  "checklist": {{
+    "sub_coordinators_agree": <true/false>,
+    "arithmetic_verified": <true/false>,
+    "units_correct": <true/false>
+  }}
+}}
+"""
+        out = self.coordinator.generate_response(
+            prompt=global_prompt,
+            temperature=float(self._get_opt("commitment_temperature", 0.1)),
+            top_p=float(self._get_opt("commitment_top_p", 0.3)),
+            repetition_penalty=float(self._get_opt("commitment_repetition_penalty", 1.05)),
+            max_tokens=int(self._get_opt("commitment_max_tokens", 150)),
+        )
+        final_answer, metadata = self._parse_structured_commitment(self._post_sanitize_text(out))
+        metadata["hierarchy"] = {
+            "n_sub_coordinators": len(sub_records),
+            "sub_commitments": [
+                {
+                    "sub_coordinator": record["sub_coordinator"],
+                    "executors": record["executors"],
+                    "commitment": record["commitment"],
+                    "metadata": record["metadata"],
+                }
+                for record in sub_records
+            ],
+        }
+        self._last_hierarchy_trace = sub_records
+        self._last_commitment_metadata = metadata
         return f"\\boxed{{{final_answer}}}"
 
     def _parse_structured_commitment(self, raw_output: str) -> Tuple[str, Dict[str, Any]]:

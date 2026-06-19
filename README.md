@@ -129,7 +129,8 @@ Notes:
 
 ### Key Parameters
 
-- `n_agents`: Number of executor agents (e.g., 3, 5, 8)
+- `n_agents`: Number of executor agents. The default hierarchy uses 6 executors.
+- `hierarchy`: Coordinator layout. The default is 1 global coordinator, 2 sub-coordinators, and 3 executors per sub-coordinator.
 - `coordinator_model`: Coordinator LLM model name  
 - `executor_model`: Executor LLM model name
 - `update_interval`: Gradient update frequency (default: 10 steps)

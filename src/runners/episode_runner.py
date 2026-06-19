@@ -436,6 +436,9 @@ class EpisodeRunner:
                 "rounds": mac_info.get("baseline_discussion_history", []),
             }
 
+        if isinstance(mac_info, dict) and mac_info.get("hierarchy"):
+            self._last_trace["hierarchy"] = mac_info["hierarchy"]
+
         if bne_data is not None:
             e_init_np = bne_data["e_init"].detach().cpu().numpy()
             e_refined_np = bne_data["e_refined"].detach().cpu().numpy()
