@@ -316,7 +316,7 @@ class LLMBasicMAC:
             except Exception as ex:
                 self.logger.warning(f"[MAC] apply discrete->prompt failed: {ex}")
 
-        # Tie discrete actions to prompt embeddings via simple bins over [T_min, p_max] ranges
+        # Tie discrete actions to prompt embeddings via simple bins over [temperature, top_p] ranges.
         prompt_embeds = agent_info.get("prompt_embeddings")
         if prompt_embeds is not None:
             prompt_embeds = prompt_embeds.clone()
@@ -350,7 +350,7 @@ class LLMBasicMAC:
                         e.data[..., 0].clamp_(float(getattr(self.args.sampling, "temperature_min", 0.1)),
                                               float(getattr(self.args.sampling, "temperature_max", 2.0)))
                         e.data[..., 1].clamp_(float(getattr(self.args.sampling, "p_min", 0.1)),
-                                              float(getattr(self.args.sampling, "p_max", 0.95)))
+                                              float(getattr(self.args.sampling, "p_max", 0.9)))
                 agent_info["prompt_embeddings"] = e.detach().unsqueeze(0)  # (B=1,N,2)
             except Exception as ex:
                 self.logger.warning(f"[MAC] BNE refine skipped: {ex}")
@@ -495,8 +495,8 @@ class LLMBasicMAC:
 
             T_min = float(getattr(self.args.sampling, "temperature_min", 0.1))
             T_max = float(getattr(self.args.sampling, "temperature_max", 2.0))
-            p_min = float(getattr(self.args.sampling, "p_min", 0.8))   # repetition_penalty min
-            p_max = float(getattr(self.args.sampling, "p_max", 1.3))   # repetition_penalty max
+            p_min = float(getattr(self.args.sampling, "p_min", 0.1))   # top_p min
+            p_max = float(getattr(self.args.sampling, "p_max", 0.9))   # top_p max
 
             T_target = T_min + frac * (T_max - T_min)
             p_target = p_max - frac * (p_max - p_min)
@@ -552,8 +552,8 @@ class LLMBasicMAC:
         # Sampling
         T_min = float(getattr(getattr(self.args, "sampling", object()), "temperature_min", 0.1))
         T_max = float(getattr(getattr(self.args, "sampling", object()), "temperature_max", 2.0))
-        p_min = float(getattr(getattr(self.args, "sampling", object()), "p_min", 0.8))   # repetition_penalty min
-        p_max = float(getattr(getattr(self.args, "sampling", object()), "p_max", 1.3))   # repetition_penalty max
+        p_min = float(getattr(getattr(self.args, "sampling", object()), "p_min", 0.1))   # top_p min
+        p_max = float(getattr(getattr(self.args, "sampling", object()), "p_max", 0.9))   # top_p max
 
         N = self.n_agents
 
@@ -662,7 +662,7 @@ class LLMBasicMAC:
                 e_next = torch.stack(
                     [
                         torch.clamp(e_next_raw[:, 0], T_min, T_max),  # Temperature
-                        torch.clamp(e_next_raw[:, 1], p_min, p_max),  # repetition_penalty
+                        torch.clamp(e_next_raw[:, 1], p_min, p_max),  # top_p
                     ],
                     dim=-1
                 )
@@ -962,7 +962,7 @@ class LLMBasicMAC:
 
                 # Clamp to valid range
                 T_i = max(T_min, min(T_max, T_i))
-                p_i = max(p_min, min(p_max, p_i))  # repetition_penalty
+                p_i = max(p_min, min(p_max, p_i))  # top_p
 
                 # Generate with explicit parameters (stateless)
                 resp = self.agent.generate_answer(
@@ -1029,7 +1029,7 @@ class LLMBasicMAC:
 
                 # Clamp to configured bounds (unified with training)
                 e_new_i[0] = torch.clamp(e_new_i[0], T_min, T_max)  # Temperature
-                e_new_i[1] = torch.clamp(e_new_i[1], p_min, p_max)  # repetition_penalty
+                e_new_i[1] = torch.clamp(e_new_i[1], p_min, p_max)  # top_p
 
                 e_new.append(e_new_i)
 

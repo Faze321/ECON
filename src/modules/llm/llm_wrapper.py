@@ -38,21 +38,34 @@ class ImprovedLLMWrapper:
         """
         Known kwargs that we ALLOW silently (forward/back compat):
           - timeout_s: alias of timeout (in seconds)
+          - top_p_default/default_top_p: default top-p if generate_response does not receive one
+          - repetition_penalty_default/default_repetition_penalty: default repetition penalty
           - anything else is ignored (we just log once in debug)
         """
         # alias mapping
-        if timeout is None and "timeout_s" in kwargs and kwargs["timeout_s"] is not None:
+        timeout_s = kwargs.pop("timeout_s", None)
+        if timeout is None and timeout_s is not None:
             try:
-                timeout = int(kwargs["timeout_s"])
+                timeout = int(timeout_s)
             except Exception:
                 timeout = None
 
         if timeout is None:
             timeout = 60  # default
 
+        default_top_p_raw = kwargs.pop("top_p_default", None)
+        if default_top_p_raw is None:
+            default_top_p_raw = kwargs.pop("default_top_p", 0.9)
+        default_repetition_penalty_raw = kwargs.pop("repetition_penalty_default", None)
+        if default_repetition_penalty_raw is None:
+            default_repetition_penalty_raw = kwargs.pop("default_repetition_penalty", 1.05)
+
         if debug and kwargs:
             safe_keys = ", ".join(sorted(k for k in kwargs.keys()))
             logger.debug(f"[ImprovedLLMWrapper] Ignoring extra kwargs: {safe_keys}")
+
+        default_top_p = float(default_top_p_raw)
+        default_repetition_penalty = float(default_repetition_penalty_raw)
 
         self.cfg = LLMConfig(
             api_key=api_key,
@@ -61,6 +74,8 @@ class ImprovedLLMWrapper:
             timeout=int(timeout),
             max_retries=int(max_retries),
             debug=bool(debug),
+            default_top_p=default_top_p,
+            default_repetition_penalty=default_repetition_penalty,
         )
         # 仅为接口兼容保留
         self.belief_dim = belief_dim
