@@ -61,7 +61,7 @@ class BeliefPolicyNetwork(nn.Module):
     输入: token_ids (B, L)
     输出: {
         "belief_state": (B, belief_dim),
-        "prompt_embedding": (B, 2),  # [T, p]
+        "prompt_embedding": (B, 2),  # [temperature, top_p]
         "q_value": (B, 1)
     }
     """
@@ -117,7 +117,7 @@ class BeliefPolicyNetwork(nn.Module):
             nn.Linear(hidden_dim, belief_dim),
         )
 
-        # Prompt parameters head (T, repetition_penalty)
+        # Prompt parameters head (temperature, top_p)
         self.prompt_head = nn.Sequential(
             nn.Linear(belief_dim, 128),
             nn.ReLU(),
@@ -143,7 +143,7 @@ class BeliefPolicyNetwork(nn.Module):
         Returns:
             dict with:
                 - belief_state: (B, belief_dim)
-                - prompt_embedding: (B, 2) [T, p]
+                - prompt_embedding: (B, 2) [temperature, top_p]
                 - q_value: (B, 1)
         """
         if token_ids.ndim == 1:
@@ -190,11 +190,11 @@ class BeliefPolicyNetwork(nn.Module):
         # Belief state
         belief = self.belief_head(pooled_gru)  # (B, belief_dim)
 
-        # Prompt parameters (T, repetition_penalty)
+        # Prompt parameters (temperature, top_p)
         prompt_logits = self.prompt_head(belief)  # (B, 2)
         T = self.T_min + (self.T_max - self.T_min) * torch.sigmoid(prompt_logits[:, 0:1])
-        rep = self.p_min + (self.p_max - self.p_min) * torch.sigmoid(prompt_logits[:, 1:2])
-        prompt_embedding = torch.cat([T, rep], dim=-1)  # (B, 2) -> [temperature, repetition_penalty]
+        top_p = self.p_min + (self.p_max - self.p_min) * torch.sigmoid(prompt_logits[:, 1:2])
+        prompt_embedding = torch.cat([T, top_p], dim=-1)  # (B, 2) -> [temperature, top_p]
 
         # Local Q value
         q_value = self.q_head(belief)  # (B, 1)

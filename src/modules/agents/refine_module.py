@@ -14,7 +14,7 @@ class RefineModule(nn.Module):
     关键特性：
     1. 输入包含agent自己的belief和输出
     2. 输入包含全局commitment和group representation
-    3. 输出是对prompt parameters的调整量 delta_e = (ΔT, Δp)
+    3. 输出是对prompt parameters的调整量 delta_e = (delta_temperature, delta_top_p)
 
     这体现了BNE的核心：每个agent根据全局信息（包括其他agent的信息）
     来调整自己的策略参数
@@ -53,7 +53,7 @@ class RefineModule(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 2),  # 输出 (ΔT, Δp)
+            nn.Linear(hidden_dim // 2, 2),  # output (delta_temperature, delta_top_p)
             nn.Tanh()  # 限制在[-1, 1]
         )
 
@@ -71,10 +71,10 @@ class RefineModule(nn.Module):
             output_i_emb: (B, commitment_dim) - 当前agent的输出embedding
             commitment_emb: (B, commitment_dim) - 全局commitment embedding
             group_repr: (B, belief_dim) - 所有agent的聚合表示（包含其他agent信息）
-            e_prev: (B, 2) - 当前的prompt parameters (T, p)
+            e_prev: (B, 2) - 当前的prompt parameters (temperature, top_p)
 
         Returns:
-            delta_e: (B, 2) - 调整量 (ΔT, Δp)
+            delta_e: (B, 2) - 调整量 (delta_temperature, delta_top_p)
         """
         # 拼接所有输入
         x = torch.cat([

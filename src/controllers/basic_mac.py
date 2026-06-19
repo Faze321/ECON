@@ -24,7 +24,7 @@ from utils.answer_extraction import _normalize_number as extract_answer_number
 class LLMBasicMAC:
     """
     Multi-Agent Controller for ECON.
-    - Agent: belief + local Q + prompt embeddings (T_i, p_i)
+    - Agent: belief + local Q + prompt embeddings (temperature_i, top_p_i)
     - Coordinator LLM:
         1) Generate STRATEGY & FORMAT (no numbers)
         2) Aggregate executors to produce COMMITMENT (only \\boxed{<number>})
@@ -223,6 +223,9 @@ class LLMBasicMAC:
             return getattr(self.args.llm, key)
         return default
 
+    def _get_executor_repetition_penalty(self) -> float:
+        return float(self._get_opt("executor_repetition_penalty", self._get_opt("repetition_penalty_default", 1.05)))
+
     def _init_hierarchy_config(self):
         cfg = getattr(self.args, "hierarchy", object())
         self.hierarchy_enabled = bool(getattr(cfg, "enabled", False))
@@ -343,6 +346,7 @@ Sub-Coordinator {group_idx + 1} Strategy:
             strategy=strategy,
             temperature=temperature,
             top_p=top_p,
+            repetition_penalty=self._get_executor_repetition_penalty(),
         )
 
     def _build_inputs(self, batch: Any, t: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -460,7 +464,7 @@ Sub-Coordinator {group_idx + 1} Strategy:
             except Exception as ex:
                 self.logger.warning(f"[MAC] apply discrete->prompt failed: {ex}")
 
-        # Tie discrete actions to prompt embeddings via simple bins over [T_min, p_max] ranges
+        # Tie discrete actions to prompt embeddings via simple bins over temperature/top_p ranges
         prompt_embeds = agent_info.get("prompt_embeddings")
         if prompt_embeds is not None:
             prompt_embeds = prompt_embeds.clone()
@@ -494,7 +498,7 @@ Sub-Coordinator {group_idx + 1} Strategy:
                         e.data[..., 0].clamp_(float(getattr(self.args.sampling, "temperature_min", 0.1)),
                                               float(getattr(self.args.sampling, "temperature_max", 2.0)))
                         e.data[..., 1].clamp_(float(getattr(self.args.sampling, "p_min", 0.1)),
-                                              float(getattr(self.args.sampling, "p_max", 0.95)))
+                                              float(getattr(self.args.sampling, "p_max", 0.9)))
                 agent_info["prompt_embeddings"] = e.detach().unsqueeze(0)  # (B=1,N,2)
             except Exception as ex:
                 self.logger.warning(f"[MAC] BNE refine skipped: {ex}")
@@ -630,7 +634,7 @@ Sub-Coordinator {group_idx + 1} Strategy:
 
     def _apply_discrete_to_prompt(self, prompt_embeddings: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """
-        Map discrete action ids to target [T, p] bins and blend with network outputs.
+        Map discrete action ids to target [temperature, top_p] bins and blend with network outputs.
         This makes the discrete action space influence generation and rewards.
         """
         if prompt_embeddings is None or actions is None:
@@ -647,8 +651,8 @@ Sub-Coordinator {group_idx + 1} Strategy:
 
             T_min = float(getattr(self.args.sampling, "temperature_min", 0.1))
             T_max = float(getattr(self.args.sampling, "temperature_max", 2.0))
-            p_min = float(getattr(self.args.sampling, "p_min", 0.8))   # repetition_penalty min
-            p_max = float(getattr(self.args.sampling, "p_max", 1.3))   # repetition_penalty max
+            p_min = float(getattr(self.args.sampling, "p_min", 0.1))   # top_p min
+            p_max = float(getattr(self.args.sampling, "p_max", 0.9))   # top_p max
 
             T_target = T_min + frac * (T_max - T_min)
             p_target = p_max - frac * (p_max - p_min)
@@ -704,8 +708,8 @@ Sub-Coordinator {group_idx + 1} Strategy:
         # Sampling
         T_min = float(getattr(getattr(self.args, "sampling", object()), "temperature_min", 0.1))
         T_max = float(getattr(getattr(self.args, "sampling", object()), "temperature_max", 2.0))
-        p_min = float(getattr(getattr(self.args, "sampling", object()), "p_min", 0.8))   # repetition_penalty min
-        p_max = float(getattr(getattr(self.args, "sampling", object()), "p_max", 1.3))   # repetition_penalty max
+        p_min = float(getattr(getattr(self.args, "sampling", object()), "p_min", 0.1))   # top_p min
+        p_max = float(getattr(getattr(self.args, "sampling", object()), "p_max", 0.9))   # top_p max
 
         N = self.n_agents
 
@@ -817,7 +821,7 @@ Sub-Coordinator {group_idx + 1} Strategy:
                 e_next = torch.stack(
                     [
                         torch.clamp(e_next_raw[:, 0], T_min, T_max),  # Temperature
-                        torch.clamp(e_next_raw[:, 1], p_min, p_max),  # repetition_penalty
+                        torch.clamp(e_next_raw[:, 1], p_min, p_max),  # top_p
                     ],
                     dim=-1
                 )
@@ -1123,7 +1127,7 @@ Sub-Coordinator {group_idx + 1} Strategy:
 
                 # Clamp to valid range
                 T_i = max(T_min, min(T_max, T_i))
-                p_i = max(p_min, min(p_max, p_i))  # repetition_penalty
+                p_i = max(p_min, min(p_max, p_i))  # top_p
 
                 # Generate with explicit parameters (stateless)
                 resp = self._generate_agent_answer(
@@ -1192,7 +1196,7 @@ Sub-Coordinator {group_idx + 1} Strategy:
 
                 # Clamp to configured bounds (unified with training)
                 e_new_i[0] = torch.clamp(e_new_i[0], T_min, T_max)  # Temperature
-                e_new_i[1] = torch.clamp(e_new_i[1], p_min, p_max)  # repetition_penalty
+                e_new_i[1] = torch.clamp(e_new_i[1], p_min, p_max)  # top_p
 
                 e_new.append(e_new_i)
 

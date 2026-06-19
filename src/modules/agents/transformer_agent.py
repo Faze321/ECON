@@ -209,10 +209,9 @@ class LLMTransformerAgent(nn.Module):
 
         self.T_min = float(getattr(args.sampling, "temperature_min", 0.1))
         self.T_max = float(getattr(args.sampling, "temperature_max", 2.0))
-        # p is repetition penalty per paper
-        self.p_min = float(getattr(args.sampling, "p_min", 0.8))
-        self.p_max = float(getattr(args.sampling, "p_max", 1.3))
-        self.top_p_default = float(getattr(args.sampling, "top_p_default", 0.9))
+        # The second prompt parameter is top_p. Repetition penalty is fixed.
+        self.p_min = float(getattr(args.sampling, "p_min", 0.1))
+        self.p_max = float(getattr(args.sampling, "p_max", 0.9))
 
         max_token_len = getattr(args.env_args, "max_question_length", 512)
         vocab_size = getattr(args, "vocab_size", 50257)
@@ -244,7 +243,9 @@ class LLMTransformerAgent(nn.Module):
 
         exec_model = _get_opt("executor_model", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
         api_key = _get_opt("llm_api_key", None)
-        rep_penalty_default = float(getattr(args, "repetition_penalty_default", 1.1))
+        self.repetition_penalty_default = float(
+            _get_opt("executor_repetition_penalty", _get_opt("repetition_penalty_default", 1.05))
+        )
 
         self.llm_wrapper = ImprovedLLMWrapper(
             api_key=api_key,
@@ -253,7 +254,7 @@ class LLMTransformerAgent(nn.Module):
             debug=getattr(args, "debug", getattr(getattr(args, "system", object()), "debug", False)),
             max_retries=getattr(args, "llm_max_retries", 6),
             timeout_s=getattr(args, "llm_timeout_s", 60),
-            repetition_penalty_default=rep_penalty_default,
+            repetition_penalty_default=self.repetition_penalty_default,
         )
 
         # 删除隐式状态: current_prompt_embedding_tensor
@@ -312,14 +313,17 @@ class LLMTransformerAgent(nn.Module):
         """
         # Fallback到配置的默认值 (中点)
         default_T = (self.T_min + self.T_max) / 2.0
-        default_p = (self.p_min + self.p_max) / 2.0
+        default_top_p = (self.p_min + self.p_max) / 2.0
 
         final_T = float(temperature) if temperature is not None else default_T
-        final_rep_penalty = float(top_p) if top_p is not None else default_p  # reuse second dim as repetition penalty
+        final_top_p = float(top_p) if top_p is not None else default_top_p
+        final_repetition_penalty = (
+            float(repetition_penalty) if repetition_penalty is not None else self.repetition_penalty_default
+        )
 
         # Clamp到有效范围
         final_T = max(self.T_min, min(self.T_max, final_T))
-        final_rep_penalty = max(self.p_min, min(self.p_max, final_rep_penalty))
+        final_top_p = max(self.p_min, min(self.p_max, final_top_p))
 
         prompt = f"""You are a specialist Executor agent within a collaborative team. Your work will be critically reviewed by a Coordinator to determine the final answer. Therefore, absolute clarity and accuracy are paramount.
 
@@ -341,8 +345,8 @@ Begin your detailed solution now.
         txt = self.llm_wrapper.generate_response(
             prompt=prompt,
             temperature=final_T,
-            top_p=self.top_p_default,
-            repetition_penalty=repetition_penalty if repetition_penalty is not None else final_rep_penalty,
+            top_p=final_top_p,
+            repetition_penalty=final_repetition_penalty,
             max_tokens=2048,
         )
 

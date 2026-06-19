@@ -42,7 +42,7 @@ llm:
   coordinator_top_p: 0.9
   executor_temperature: 0.2
   executor_top_p: 0.9
-  baseline_rounds: 3
+  baseline_rounds: 4
 
 env: "huggingface_dataset_env"
 env_args:
