@@ -24,6 +24,7 @@ class ImprovedLLMWrapper:
     """
     Together chat-completions wrapper with robust postprocessing:
       - accept both `timeout` and legacy alias `timeout_s`
+      - accept both `default_repetition_penalty` and legacy alias `repetition_penalty_default`
       - fix control chars (esp. JSON-decoded backspace \b -> keeps \\boxed intact)
     """
     def __init__(self,
@@ -32,23 +33,28 @@ class ImprovedLLMWrapper:
                  belief_dim: Optional[int] = None,
                  base_url: str = "https://openrouter.ai/api/v1",
                  timeout: Optional[int] = None,
+                 timeout_s: Optional[int] = None,
                  max_retries: int = 3,
                  debug: bool = False,
+                 default_repetition_penalty: Optional[float] = None,
+                 repetition_penalty_default: Optional[float] = None,
                  **kwargs):
         """
-        Known kwargs that we ALLOW silently (forward/back compat):
-          - timeout_s: alias of timeout (in seconds)
-          - anything else is ignored (we just log once in debug)
+        Extra kwargs are ignored for forward/back compat and logged only in debug.
         """
         # alias mapping
-        if timeout is None and "timeout_s" in kwargs and kwargs["timeout_s"] is not None:
+        if timeout is None and timeout_s is not None:
             try:
-                timeout = int(kwargs["timeout_s"])
+                timeout = int(timeout_s)
             except Exception:
                 timeout = None
 
         if timeout is None:
             timeout = 60  # default
+        if default_repetition_penalty is None:
+            default_repetition_penalty = repetition_penalty_default
+        if default_repetition_penalty is None:
+            default_repetition_penalty = 1.05
 
         if debug and kwargs:
             safe_keys = ", ".join(sorted(k for k in kwargs.keys()))
@@ -61,6 +67,7 @@ class ImprovedLLMWrapper:
             timeout=int(timeout),
             max_retries=int(max_retries),
             debug=bool(debug),
+            default_repetition_penalty=float(default_repetition_penalty),
         )
         # 仅为接口兼容保留
         self.belief_dim = belief_dim
