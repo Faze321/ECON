@@ -171,6 +171,9 @@ class LLMBasicMAC:
         for wrapper in self._usage_wrappers().values():
             if hasattr(wrapper, "reset_usage"):
                 wrapper.reset_usage()
+        for wrapper in getattr(self, "sub_coordinators", []):
+            if hasattr(wrapper, "reset_usage"):
+                wrapper.reset_usage()
 
     def get_token_usage(self) -> Dict[str, Dict[str, int]]:
         usage = {}

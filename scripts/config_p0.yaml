@@ -41,7 +41,7 @@ commitment_embedding_model_name: "BAAI/bge-large-en-v1.5"
 
 env: "huggingface_dataset_env"
 env_args:
-  hf_dataset_path: "gsm8k"
+  hf_dataset_path: "openai/gsm8k"
   hf_dataset_config_name: "main"
   dataset_split: "train"
   max_question_length: 1024
